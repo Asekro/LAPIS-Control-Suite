@@ -3,7 +3,8 @@
 Reference: iseg SCPI Programmers Guide, 2026-10-23, chapters 2-4, 6, 9.
 No output changes on open/close. No automatic retry after ambiguous I/O errors.
 All voltages supplied to set_voltage are SIGNED volts. NHS commands use
-magnitudes; the fixed hardware polarity is checked through channel status bit 0.
+magnitudes. NHS firmware 2.20 polarity is checked through signed VNOM because
+the observed devices do not populate channel status bit 0; other versions use it.
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -133,10 +134,12 @@ class NHSModule:
 
     polarity: '+' or '-', expected fixed hardware polarity.
     max_voltage: mandatory application limit in volts (positive magnitude).
+    echo_handshake: send each byte only after its exact echo; requires echo ON.
     serial_factory: dependency injection for offline tests.
     """
     def __init__(self, port: str, *, polarity: str, max_voltage: float,
                  timeout: float = 2.0, expected_serial: str | None = None,
+                 echo_handshake: bool = False,
                  serial_factory: Callable = serial.Serial):
         if polarity not in ('+', '-'):
             raise ValueError("polarity must be '+' or '-'")
@@ -148,6 +151,8 @@ class NHSModule:
         if self.max_voltage <= 0 or self.timeout <= 0:
             raise ValueError('max_voltage and timeout must be positive')
         self.expected_serial = expected_serial
+        self.echo_handshake = echo_handshake
+        self.firmware_version = ''
         self._factory = serial_factory
         self._serial = None
         self._lock = threading.RLock()
@@ -171,6 +176,7 @@ class NHSModule:
                     raise DeviceError(f'Unexpected identification: {self.identification}')
                 if self.expected_serial is not None and parts[2] != self.expected_serial:
                     raise DeviceError(f'Serial mismatch: {parts[2]} != {self.expected_serial}')
+                self.firmware_version = parts[3]
                 firmware = self.query(':READ:FIRMWARE:NAME?')
                 if firmware != 'N06C2':
                     raise DeviceError(f'Expected NHS firmware N06C2, received {firmware!r}')
@@ -208,14 +214,29 @@ class NHSModule:
             raise ValueError('NHS receive buffer is 80 bytes including terminator')
         try:
             log.debug('%s TX %s', self.port, command)
-            if self._serial.write(wire) != len(wire):
+            if self.echo_handshake:
+                for index, value in enumerate(wire):
+                    byte = bytes((value,))
+                    if self._serial.write(byte) != 1:
+                        raise CommunicationError('Incomplete write; command outcome unknown')
+                    echo = self._serial.read(1)
+                    if echo != byte:
+                        raise ProtocolError(
+                            f'Echo mismatch at byte {index} of {command!r}: '
+                            f'expected {byte!r}, received {echo!r}; command may be incomplete')
+                log.debug('%s byte echoes verified', self.port)
+            elif self._serial.write(wire) != len(wire):
                 raise CommunicationError('Incomplete write; command outcome unknown')
             deadline = time.monotonic() + self.timeout
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise CommunicationError(f'Timeout: {command}')
-                self._serial.timeout = remaining
+                # Keep the timeout configured by open(). On Windows pyserial's
+                # timeout setter also calls SetCommState, reapplying baud/data
+                # settings while the device may already be transmitting its echo.
+                # read_until has its own fixed timeout; the deadline also bounds
+                # how long empty lines / echoes may extend this transaction.
                 raw = self._serial.read_until(b'\r\n', 202)
                 if not raw.endswith(b'\r\n') or len(raw) > 200:
                     raise CommunicationError(f'Missing/truncated response to {command}: {raw!r}')
@@ -223,12 +244,12 @@ class NHSModule:
                 log.debug('%s RX %s', self.port, answer)
                 if answer == command or answer == '':
                     continue
+                if len(command) > 1 and answer.endswith(command[1:]):
+                    raise ProtocolError(f'Corrupted command echo: {answer!r}; expected {command!r}')
                 return answer.strip()
         except (OSError, serial.SerialException, UnicodeError, CommunicationError) as exc:
             self._broken = True
             raise CommunicationError(f'{self.port}: {exc}') from exc
-        finally:
-            self._serial.timeout = self.timeout
 
     def query(self, command: str) -> str:
         """Advanced raw single query; caller owns semantics. No automatic retries."""
@@ -253,8 +274,19 @@ class NHSModule:
 
     def _check_polarity(self, channel):
         status = self.read_status(channel)
-        if bool(status & ChannelStatus.POSITIVE) != (self.sign > 0):
-            raise DeviceError(f'{self.port} channel {channel}: unexpected hardware polarity')
+        if self.firmware_version == '2.20':
+            # Both observed N06C2/2.20 modules report bit 0 = 0, but VNOM
+            # correctly reports +4000 V and -4000 V respectively. Do not
+            # infer polarity from VSET or VMEAS (zero and noise are ambiguous).
+            nominal = self._number(f':READ:VOLT:NOM? {self._channel(channel)}', 'V')
+            matches = nominal * self.sign > 0
+            detail = f'signed nominal voltage {nominal:g} V'
+        else:
+            matches = bool(status & ChannelStatus.POSITIVE) == (self.sign > 0)
+            detail = f'channel status 0x{int(status):X}'
+        if not matches:
+            raise DeviceError(f'{self.port} channel {channel}: unexpected hardware polarity '
+                              f'({detail}, expected {self.polarity})')
         return status
 
     def _check_input_error(self, channel=None):
@@ -356,7 +388,10 @@ class NHSModule:
         return ModuleEvent(self._integer(':READ:MODULE:EVENT:STAT?'))
 
     def read_voltage_ramp(self):
-        return self._number(':READ:RAMP:VOLT?', '%/s')
+        # Observed N06C2/2.20 responses use '%' for the percent-of-VNOM/s
+        # ramp setting. Accept that spelling here, without relaxing other units.
+        answer = self.query(':READ:RAMP:VOLT?')
+        return parse_number(answer, '%' if answer.strip().endswith('%') else '%/s')
 
     def set_voltage_ramp(self, percent_per_second):
         """MODULE-wide ramp in % of nominal voltage per second, all six channels."""
@@ -390,13 +425,16 @@ class Bender:
     """
     def __init__(self, positive_port, negative_port, *, max_voltage,
                  timeout=2.0, positive_serial=None, negative_serial=None,
+                 echo_handshake=False,
                  serial_factory=serial.Serial):
         if positive_port.strip().casefold() == negative_port.strip().casefold():
             raise ValueError('Two different COM ports are required')
         self.positive = NHSModule(positive_port, polarity='+', max_voltage=max_voltage,
-            timeout=timeout, expected_serial=positive_serial, serial_factory=serial_factory)
+            timeout=timeout, expected_serial=positive_serial,
+            echo_handshake=echo_handshake, serial_factory=serial_factory)
         self.negative = NHSModule(negative_port, polarity='-', max_voltage=max_voltage,
-            timeout=timeout, expected_serial=negative_serial, serial_factory=serial_factory)
+            timeout=timeout, expected_serial=negative_serial,
+            echo_handshake=echo_handshake, serial_factory=serial_factory)
         self.channels = {'p0': (self.positive, 0), 'p1': (self.positive, 1),
                          'n0': (self.negative, 0), 'n1': (self.negative, 1)}
         self._lock = threading.RLock()

@@ -1,21 +1,47 @@
 # NHS-Treiber für den LAPIS-Bender
 
-Python 3.10 oder neuer. Zwei iseg NHS 6040, positiv und negativ, jeweils Kanal 0 und 1.
-Version 1.0, 15.11.2026. Implementiert und offline geprüft; noch nicht an realen NHS-Modulen getestet.
+Python 3.10 oder neuer. Zwei iseg NHS, positiv und negativ, jeweils Kanal 0 und 1.
+Stand 15.11.2026: 26 Offline-Tests bestanden. Verbindung, Modul-/Kanalabfragen,
+zehn Messzyklen, Sollwertsetzen auf ±10 V sowie Ein- und Ausschalten wurden mit
+den angeschlossenen N06C2-Modulen mit Firmwareversion 2.20 im Notebook geprüft.
+Das ist ein Funktionstest, keine vollständige Prüfung aller Funktionen oder
+der Spannungsgenauigkeit über den gesamten Arbeitsbereich.
 
 ## Installation und erster Test
 
-ZIP entpacken, Terminal in diesem Ordner öffnen:
+Terminal in diesem Ordner öffnen und die Treiberabhängigkeit installieren:
 
 ```powershell
 python -m pip install -r requirements.txt
-python test_verbindung.py --positive COM7 --negative COM8
 ```
 
-COM7/COM8 sind Platzhalter: Im Windows-Gerätemanager nachsehen und die beiden
-Module eindeutig zuordnen. Der erste Test fragt ausschließlich Gerätekennung,
-Polarität, Messwerte und Status ab. Er verändert keine Sollwerte und schaltet
-keinen Ausgang. Falls erforderlich, FTDI-VCP-Treiber installieren.
+Für manuelle Hardwaretests `test_bender.ipynb` mit einem Python-Jupyter-Kernel
+öffnen. Nach Treiberänderungen den Kernel neu starten. Die Konfigurationszelle
+und Punkte 1–4 ausführen; 1a/1b und 2a sind optionale Diagnoseabschnitte.
+Schreib- und Einschaltfreigaben sind standardmäßig `False`. Sie für die
+optionalen Punkte 5/6 ausdrücklich aktivieren. Der Treiber benötigt nur pyserial;
+zum Ausführen des Notebooks zusätzlich eine Jupyter-Umgebung mit IPython.
+
+Aktuelle Zuordnung am Testaufbau:
+
+| Modul | COM-Port | USB-Seriennummer | Geräte-Seriennummer aus `*IDN?` |
+|---|---|---|---|
+| Positiv | COM12 | AI05M8IUA | 8000311 |
+| Negativ | COM11 | A600C0IIA | 8000312 |
+
+COM-Ports können nach dem Umstecken wechseln. Die Treiberparameter
+`positive_serial` und `negative_serial` erwarten Geräte-Seriennummern, keine USB-IDs.
+Die normalen Notebook-Tests verwenden die konfigurierten Ports und prüfen die
+Polarität; die zusätzlichen Diagnosezellen finden die Ports über ihre USB-IDs.
+
+Alternativ ohne Jupyter rein lesend testen:
+
+```powershell
+python test_verbindung.py --positive COM12 --negative COM11
+```
+
+Dieser Test verändert keine Sollwerte und schaltet keinen Ausgang.
+Falls erforderlich, FTDI-VCP-Treiber installieren.
 Hersteller-GUI vor dem Test schließen, damit sie den COM-Port nicht belegt.
 Bei Problemen mit `--debug` erneut ausführen; das protokolliert Befehle und Antworten.
 
@@ -27,7 +53,8 @@ Bei Problemen mit `--debug` erneut ausführen; das protokolliert Befehle und Ant
 ```python
 from iseg_nhs import Bender
 
-with Bender("COM7", "COM8", max_voltage=100) as bender:
+with Bender("COM12", "COM11", max_voltage=100,
+            positive_serial="8000311", negative_serial="8000312") as bender:
     print(bender.positive.identification)
     print(bender.negative.identification)
     print(bender.read_all())
@@ -63,8 +90,16 @@ print(reading.voltage_set, reading.voltage, reading.current)
 Spannungen werden an der Python-Schnittstelle mit Vorzeichen angegeben. Der
 Treiber sendet Beträge an die fest gepolten NHS-Ausgänge und normiert die
 Spannungsrückgaben auf die geprüfte Hardwarepolarität. Für Ströme bleibt das
-Gerätevorzeichen unverändert. Beim ersten Schreibtest muss diese Umsetzung
-auch mit Anzeige und Istspannung der realen Module bestätigt werden.
+Gerätevorzeichen unverändert. Die Messspannungen werden mit `sign * abs(raw)`
+auf die geprüfte Modulpolarität normiert. Bei Messwerten nahe null bleibt
+das rohe Vorzeichen daher nicht erhalten; die Diagnosezelle 2a zeigt Rohantworten.
+
+Beim ±10-V-Test wurden am positiven Modul etwa 8,7 V und am negativen Modul
+etwa −10,05 V gemeldet. Laut Einschätzung des Anwenders könnte dies mit dem
+unteren zuverlässigen Arbeitsbereich ab etwa 40 V zusammenhängen. Die Ursache
+und die erreichbare Genauigkeit darunter sind noch nicht quantifiziert.
+Da kleinere Spannungen benötigt werden, führt der Treiber keine 40-V-Untergrenze
+ein und verändert die angeforderten Sollwerte nicht durch eine Kompensation.
 
 ## Funktionen
 
@@ -161,12 +196,83 @@ ist durch einen Lock geschützt. Die NHS-Puffergrenzen werden berücksichtigt.
 python -m unittest -v test_iseg_nhs.py
 ```
 
-19 Offline-Tests decken Echo an/aus, signed mapping, ungültige Werte,
+26 Offline-Tests decken Echo an/aus, signed mapping, ungültige Werte,
 Geräteverwechslung, Timeout, beschädigte Antworten, partielle Writes,
 Geräteablehnung, Sollwertabweichung, Teilfehler über beide Module und Aufräumen ab.
 Diese Tests bestätigen Softwareverhalten anhand eines simulierten Protokolls.
 Sie ersetzen nicht den Verbindungstest und einen kontrollierten Schreibtest an
 den tatsächlichen Modulen mit ihrer Firmware.
+
+| Datei | Zweck | Einordnung |
+|---|---|---|
+| `test_bender.ipynb` | Interaktive Hardwaretests und Messreihen | Bevorzugter manueller Einstieg |
+| `test_iseg_nhs.py` | Automatische Tests mit simulierten Geräten, einschließlich Fehlerfällen und Windows-Regression | Behalten; wird auch von Notebook-Punkt 8 importiert |
+| `test_verbindung.py` | Kurzer lesender Verbindungstest ohne Jupyter | Optional; funktional durch das Notebook abgedeckt |
+| `test_usb_dotnet.ps1` | Unabhängiger Windows/.NET-Vergleich | Diagnosehilfe; wird von Notebook-Punkt 1b verwendet |
+
+Das Notebook ersetzt die Offline-Tests nicht: Kommunikationsabbrüche,
+Teilfehler und ungültige Eingaben lassen sich dort ohne reale Ausgangsänderungen
+reproduzierbar prüfen. `test_verbindung.py` kann entfallen, wenn der Einstieg
+über die Kommandozeile nicht benötigt und seine Dokumentation angepasst wird.
+Das PowerShell-Skript nur zusammen mit dem zugehörigen Notebook-Abschnitt entfernen.
+
+## Bekannte Firmwarebesonderheiten und Windows-Korrektur
+
+### Korrektur des Windows-Verbindungsfehlers
+
+Im installierten pyserial-Windows-Backend ruft jede Zuweisung von `serial.timeout`
+die vollständige Portkonfiguration einschließlich `SetCommState` auf. Der Treiber
+änderte diese Eigenschaft während des laufenden Echo-/Antwortempfangs. Diese
+Zuweisungen wurden entfernt; Timeout und Leitungsparameter bleiben während
+einer Transaktion unverändert. Die Zeitgrenze wird zwischen Antwortzeilen geprüft;
+ein einzelner blockierender Leseaufruf kann noch bis zu seinem festen Timeout warten.
+
+Der unabhängige Windows/.NET-Lesetest bestand 30 Abfragen pro Modul ohne Fehler.
+Nach der Korrektur bestand auch der NHS-Treiber zehn vollständige Lesezyklen mit
+beiden Modulstatusabfragen und allen vier Bender-Kanälen im Blockmodus, ohne
+zusätzliche Pausen, Wiederholungen oder geänderte Echo-Einstellungen. Alle 26
+Offline-Tests bestehen, einschließlich einer Regression gegen Timeout-Zuweisungen
+auf einem bereits geöffneten Port. Sollwerte und Ausgänge blieben unverändert.
+
+Das Notebook enthält den Windows-Vergleich unter Punkt 1b; dafür ist kein Download
+des Herstellerprogramms nötig. Frühere gespeicherte Fehlerausgaben sind historisch.
+Nach dem Laden des geänderten Notebooks den Kernel neu starten.
+
+### Erkenntnisse aus dem Verbindungstest mit Firmware 2.20
+
+COM12 (positiv, Geräte-Seriennummer `8000311`) liefert `+4000 V` als
+Nennspannung, COM11 (negativ, Geräte-Seriennummer `8000312`) liefert `-4000 V`.
+Beide Module melden Statusbit 0 als null. Bei Firmwareversion `2.20` prüft der
+Treiber deshalb die Polarität anhand des Vorzeichens von `:READ:VOLT:NOM?`
+für jeden Kanal. Null oder ein unerwartetes Vorzeichen führen weiterhin zum
+Abbruch. Für andere Firmwareversionen bleibt die Prüfung von Statusbit 0 bestehen.
+Das ist eine Anpassung an die beobachteten Geräteantworten, keine allgemeine
+Aussage zu allen NHS-Firmwareversionen.
+
+Optional kann
+`Bender(..., echo_handshake=True)` jedes Zeichen einschließlich CR/LF einzeln
+senden und vor dem nächsten Zeichen dessen exaktes Echo prüfen. Dafür muss
+das Geräteecho eingeschaltet sein; der Treiber verändert dessen Einstellung nicht.
+Das Notebook und der Treiber verwenden standardmäßig Blockversand. Bei fehlendem
+oder falschem Echo wird abgebrochen, die Verbindung als unsynchronisiert
+markiert und kein Befehl automatisch wiederholt. Der Byte-Handshake war keine
+Lösung für den damaligen Timeout-/Rekonfigurationsfehler und ist für den
+aktuellen Aufbau nicht erforderlich.
+
+Nach Änderungen an `iseg_nhs.py` den Notebook-Kernel neu starten, damit der
+aktualisierte Treiber geladen wird. Die 26 Offline-Tests prüfen unter anderem
+die vorzeichenbehaftete Nennspannung und den zeichenweisen Echo-Handshake.
+
+Der abschließende Notebook-Lauf am Hub bestand fünf kurze Kommunikationsrunden
+pro Modul, den .NET-Vergleich mit je 30 Abfragen, die vollständigen Diagnose-
+und Kanalabfragen sowie zehn Messzyklen ohne Fehler. Die davor beobachteten
+beschädigten Echos wurden nach Entfernung der Timeout-Zuweisungen nicht mehr
+reproduziert. Ein Hub- oder Kabeldefekt ist durch die Tests nicht belegt.
+
+N06C2/2.20 liefert die Rampenrate als `1.000%` statt `%/s`. Der Treiber akzeptiert
+für diese einzelne Rampenabfrage beide Einheitenschreibweisen; bei anderen
+Größen bleiben die Einheitenprüfungen unverändert. Ereignisregister werden bei
+den Lesetests nicht gelöscht, Ausgänge und Sollwerte nicht verändert.
 
 ## Dokumentationsgrundlage
 

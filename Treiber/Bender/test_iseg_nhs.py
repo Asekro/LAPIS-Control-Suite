@@ -58,6 +58,54 @@ class FakeSerial:
         data, self.buffer = self.buffer[:n], self.buffer[n:]
         return data
 
+class Firmware220Serial(FakeSerial):
+    """Captured 2.20 behavior: signed VNOM, unset polarity status bit."""
+    nominal_override = None
+
+    def write(self, data):
+        result = super().write(data)
+        command = data.decode().strip()
+        if command == '*IDN?':
+            self.buffer = self.buffer.replace(b',1.23\r\n', b',2.20\r\n')
+        elif command.startswith(':READ:CHAN:STAT?'):
+            self.buffer = (data if self.echo else b'') + b'0\r\n'
+        elif command.startswith(':READ:VOLT:NOM?'):
+            nominal = self.nominal_override
+            if nominal is None:
+                nominal = 4000 if self.positive else -4000
+            self.buffer = (data if self.echo else b'') + f'{nominal}V\r\n'.encode()
+        elif command == ':READ:RAMP:VOLT?':
+            self.buffer = (data if self.echo else b'') + b'1.000%\r\n'
+        return result
+
+
+class ByteEchoSerial(FakeSerial):
+    """Require the previous byte echo to be consumed before accepting another."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.pending = b''
+        self.bad_echo = False
+
+    def write(self, data):
+        if len(data) != 1 or self.buffer:
+            raise AssertionError('Expected one byte after consuming its predecessor echo')
+        self.pending += data
+        if self.echo:
+            self.buffer += b'!' if self.bad_echo else data
+        if self.pending.endswith(b'\r\n'):
+            command, self.pending = self.pending, b''
+            echo, self.echo = self.echo, False
+            try:
+                super().write(command)
+            finally:
+                self.echo = echo
+        return 1
+
+    def read(self, size):
+        answer, self.buffer = self.buffer[:size], self.buffer[size:]
+        return answer
+
+
 class DriverTests(unittest.TestCase):
     def module(self, polarity='+'):
         return NHSModule('P' if polarity == '+' else 'N', polarity=polarity,
@@ -178,5 +226,88 @@ class DriverTests(unittest.TestCase):
         with self.module() as m:
             for cmd in ['*IDN?\r\n:VOLT ON','X'*80+'?','*IDN?;*IDN?']:
                 with self.assertRaises(ValueError): m.query(cmd)
+
+    def test_firmware_220_uses_signed_nominal_for_both_polarities(self):
+        with Bender('P', 'N', max_voltage=100, serial_factory=Firmware220Serial) as b:
+            self.assertEqual(b.positive.firmware_version, '2.20')
+            self.assertFalse(b.positive.read_status(0) & ChannelStatus.POSITIVE)
+            b.set_voltages(p0=10, p1=11, n0=-12, n1=-13)
+            self.assertEqual(b.negative.read_voltage_set(0), -12)
+
+    def test_ramp_percent_unit_from_real_firmware_220(self):
+        with NHSModule('P', polarity='+', max_voltage=100,
+                       serial_factory=Firmware220Serial) as module:
+            self.assertEqual(module.read_voltage_ramp(), 1.0)
+            self.assertEqual(module.read_module().voltage_ramp_percent_s, 1.0)
+        with self.module() as module:
+            self.assertEqual(module.read_voltage_ramp(), 20.0)
+            module._serial.drop = True
+            module._serial.buffer = b'1.000V\r\n'
+            with self.assertRaises(ProtocolError): module.read_voltage_ramp()
+
+    def test_firmware_220_rejects_wrong_or_zero_nominal_polarity(self):
+        for port, polarity in [('N', '+'), ('P', '-')]:
+            with self.subTest(port=port):
+                m = NHSModule(port, polarity=polarity, max_voltage=100,
+                              serial_factory=Firmware220Serial)
+                with self.assertRaises(DeviceError): m.open()
+                self.assertIsNone(m._serial)
+        class ZeroNominalSerial(Firmware220Serial):
+            nominal_override = 0
+        m = NHSModule('P', polarity='+', max_voltage=100, serial_factory=ZeroNominalSerial)
+        with self.assertRaises(DeviceError): m.open()
+
+    def test_corrupted_echo_is_not_returned_as_an_answer(self):
+        with self.module() as m:
+            m._serial.drop = True
+            m._serial.buffer = b'TIDN?\r\n'
+            with self.assertRaises(CommunicationError): m.query('*IDN?')
+            self.assertTrue(m._broken)
+
+    def test_byte_handshake_consumes_crlf_echo_before_answer(self):
+        with Bender('P', 'N', max_voltage=100, echo_handshake=True,
+                    serial_factory=ByteEchoSerial) as b:
+            b.set_voltages(p0=10, p1=11, n0=-12, n1=-13)
+            self.assertEqual(b.read_all()['n1'].voltage_set, -13)
+            self.assertEqual(b.positive._serial.buffer, b'')
+
+    def test_bad_or_missing_byte_echo_stops_without_retry(self):
+        for missing in [False, True]:
+            with self.subTest(missing=missing):
+                with NHSModule('P', polarity='+', max_voltage=100, echo_handshake=True,
+                               serial_factory=ByteEchoSerial) as m:
+                    m._serial.echo = not missing
+                    m._serial.bad_echo = True
+                    with self.assertRaises(CommunicationError): m.query('*IDN?')
+                    self.assertEqual(m._serial.pending, b'*')
+                    self.assertTrue(m._broken)
+                    with self.assertRaises(CommunicationError): m.disable(0)
+                    self.assertEqual(m._serial.pending, b'*')
+
+    def test_no_timeout_reconfiguration_during_serial_transactions(self):
+        class FixedTimeout:
+            @property
+            def timeout(self):
+                return self._fixed_timeout
+
+            @timeout.setter
+            def timeout(self, value):
+                if hasattr(self, '_fixed_timeout'):
+                    raise AssertionError('Timeout assignment would reconfigure a live Windows port')
+                self._fixed_timeout = value
+
+        for handshake, base in [(False, FakeSerial), (True, ByteEchoSerial)]:
+            factory = type('FixedTimeoutSerial', (FixedTimeout, base), {})
+            with self.subTest(handshake=handshake):
+                with NHSModule('P', polarity='+', max_voltage=100,
+                               echo_handshake=handshake, serial_factory=factory) as m:
+                    self.assertIn('iseg', m.query('*IDN?'))
+                    m.read_channel(0)
+                    m.set_voltage(0, 12)
+                    self.assertEqual(m.read_voltage_set(0), 12)
+                    m._serial.drop = True
+                    with self.assertRaises(CommunicationError): m.query('*IDN?')
+                    self.assertTrue(m._broken)
+                    with self.assertRaises(CommunicationError): m.disable(0)
 
 if __name__ == '__main__': unittest.main()
