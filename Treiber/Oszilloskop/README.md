@@ -2,7 +2,7 @@
 
 Version 0.1 · 15.11.2026 · Python ab 3.10
 
-Für das **Keysight DSOX1204G** aus dem Chat „Treiberentwicklung Oszilloskop Manuals“:
+Für das **Keysight DSOX1204G**:
 USB/PyVISA, Detektordaten auf frei wählbaren Kanälen CH1–CH4, OptoSync als
 Flankentrigger auf einem dieser Kanäle und WaveGen zur Laseransteuerung.
 Auch eine in Connection Expert ermittelte LAN-VISA-Adresse kann übergeben werden.
