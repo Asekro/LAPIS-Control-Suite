@@ -1,16 +1,20 @@
 """Offline-Regressionstests: keine Hardware, keine Pulse."""
 from collections import deque
 import struct
-import json
 from pathlib import Path
-import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 import numpy as np
 import pyvisa
+
+driver_dir = str(Path(__file__).resolve().parents[1])
+if driver_dir not in sys.path:
+    sys.path.insert(0, driver_dir)
+
 from keysight_dsox1204g import KeysightDSOX1204G, ScopeError, AcquisitionTimeout
 from lapis_workflows import experimental_wavegen_gate
-import test_scope
+import scope_cli
 
 class Instrument:
     def __init__(self):
@@ -123,7 +127,7 @@ class DriverTests(unittest.TestCase):
         self.assertNotIn(':SINGle',self.inst.commands)
     def test_short_transfer_rejected(self):
         self.inst.samples=self.inst.samples[:-1]
-        with self.assertRaisesRegex(ScopeError,'Unvollständige'): self.scope.read_waveform(1)
+        with self.assertRaisesRegex(ScopeError,'Incomplete transfer'): self.scope.read_waveform(1)
     def test_invalid_preamble_rejected(self):
         self.inst.preambles[1]='1,2,3'
         with self.assertRaises(ScopeError): self.scope.read_waveform(1)
@@ -209,35 +213,32 @@ class DriverTests(unittest.TestCase):
     def test_close_off_after_transport_error(self):
         self.scope.configure_ttl(load='HIGHZ'); self.inst.fail_enable=True
         with self.assertRaises(pyvisa.errors.VisaIOError): self.scope.wavegen_output(True)
-        with self.assertRaisesRegex(ScopeError,'Abschaltung nicht bestätigt'): self.scope.close()
+        with self.assertRaisesRegex(ScopeError,'shutdown not confirmed'): self.scope.close()
         self.assertEqual(self.inst.values[':WGEN:OUTPut?'],'0'); self.assertTrue(self.inst.closed)
     def test_status_script_does_not_change_hardware(self):
-        with patch('sys.argv',['test_scope.py','--resource','USB0::TEST::INSTR']), \
-             patch.object(test_scope,'KeysightDSOX1204G',return_value=self.scope), \
+        with patch('sys.argv',['scope_cli.py','--resource','USB0::TEST::INSTR']), \
+             patch.object(scope_cli,'KeysightDSOX1204G',return_value=self.scope), \
              patch('builtins.print'):
-            test_scope.main()
+            scope_cli.main()
         self.assertTrue(all('?' in command for command in self.inst.commands))
-    def test_read_script_exports_voltage_time_metadata(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path=Path(directory)/'capture.npz'
-            with patch('sys.argv',['test_scope.py','--resource','x','--read','--output',str(path)]), \
-                 patch.object(test_scope,'KeysightDSOX1204G',return_value=self.scope), \
-                 patch('builtins.print'):
-                test_scope.main()
-            with np.load(path) as result:
-                self.assertAlmostEqual(result['ch2_voltage_v'][2],1.5)
-                np.testing.assert_allclose(result['ch1_time_s'],[-4e-9,-2e-9,0,2e-9,4e-9])
-            meta=json.loads(path.with_suffix('.json').read_text())
-            self.assertEqual(meta['waveforms']['2']['transfer_format'],'WORD')
+    def test_read_script_returns_waveforms_without_files(self):
+        with patch('sys.argv',['scope_cli.py','--resource','x','--read']), \
+             patch.object(scope_cli,'KeysightDSOX1204G',return_value=self.scope), \
+             patch('builtins.print'), \
+             patch('numpy.savez_compressed') as save_arrays, \
+             patch.object(Path,'write_text') as save_text:
+            waves=scope_cli.main()
+        self.assertAlmostEqual(waves[2].voltage_v[2],1.5)
+        np.testing.assert_allclose(waves[1].time_s,[-4e-9,-2e-9,0,2e-9,4e-9])
+        self.assertEqual(waves[2].preamble['transfer_format'],'WORD')
+        save_arrays.assert_not_called(); save_text.assert_not_called()
         self.assertFalse(any(':WGEN:OUTPut ' in c for c in self.inst.commands))
     def test_capture_script_waits_and_does_not_fire_generator(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path=Path(directory)/'single.npz'
-            with patch('sys.argv',['test_scope.py','--resource','x','--capture','--output',str(path)]), \
-                 patch.object(test_scope,'KeysightDSOX1204G',return_value=self.scope), \
-                 patch('builtins.print'):
-                test_scope.main()
-            self.assertTrue(path.exists())
+        with patch('sys.argv',['scope_cli.py','--resource','x','--capture']), \
+             patch.object(scope_cli,'KeysightDSOX1204G',return_value=self.scope), \
+             patch('builtins.print'):
+            waves=scope_cli.main()
+        self.assertEqual(set(waves),{1,2})
         self.assertLess(self.inst.commands.index(':SINGle'),self.inst.commands.index(':WAVeform:DATA?'))
         self.assertFalse(any(':WGEN:OUTPut ' in c for c in self.inst.commands))
 

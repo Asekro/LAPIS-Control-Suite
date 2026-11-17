@@ -1,15 +1,20 @@
-"""Kleiner Hardwaretest. Standard: nur Gerätekennung und Status lesen.
+"""Optionaler Hardwaretest im Terminal, ohne Dateiexport.
 
-python test_scope.py --list
-python test_scope.py --resource "USB0::...::INSTR"
-python test_scope.py --resource "USB0::...::INSTR" --read --channels 1 2
-python test_scope.py --resource "USB0::...::INSTR" --capture --channels 1 2
+Standard: nur Gerätekennung und Status lesen. Aufrufe aus dem Treiberordner:
+python tests/scope_cli.py --list
+python tests/scope_cli.py --resource "USB0::...::INSTR"
+python tests/scope_cli.py --resource "USB0::...::INSTR" --read --channels 1 --plot
+python tests/scope_cli.py --resource "USB0::...::INSTR" --capture --channels 1
 """
 import argparse
 import json
 from pathlib import Path
+import sys
 
-import numpy as np
+# Direkter Skriptaufruf funktioniert auch aus einem anderen Arbeitsverzeichnis.
+driver_dir = str(Path(__file__).resolve().parents[1])
+if driver_dir not in sys.path:
+    sys.path.insert(0, driver_dir)
 
 from keysight_dsox1204g import KeysightDSOX1204G
 
@@ -21,10 +26,9 @@ def main():
     parser.add_argument("--backend", default="")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--read", action="store_true", help="Gerät stoppen, bestehende Aufnahme lesen")
-    action.add_argument("--capture", action="store_true", help="Neue Aufnahme, Schuss extern/manuell")
+    action.add_argument("--capture", action="store_true", help="Neue Aufnahme mit der eingestellten Triggerquelle")
     parser.add_argument("--channels", type=int, nargs="+", choices=range(1, 5), default=[1, 2])
     parser.add_argument("--timeout", type=float, default=30)
-    parser.add_argument("--output", default="messung.npz")
     parser.add_argument("--plot", action="store_true")
     args = parser.parse_args()
     if args.list:
@@ -48,26 +52,12 @@ def main():
                 scope.configure_channel(ch, enabled=True)
             scope.arm_single()
             scope.wait_until_armed()
-            print("Bereit: jetzt extern/manuell triggern. WaveGen wird hier nicht eingeschaltet.", flush=True)
+            print("Bereit: warte auf die eingestellte Triggerquelle. WaveGen wird hier nicht eingeschaltet.", flush=True)
             scope.wait_for_single(timeout_s=args.timeout)
         waves = scope.read_waveforms(args.channels)
-        arrays = {}
         for ch, wave in waves.items():
-            for name in ("time_s", "voltage_v", "raw", "missing", "clipped_low", "clipped_high"):
-                arrays[f"ch{ch}_{name}"] = getattr(wave, name)
             print(f"CH{ch}: {wave.raw.size} Punkte; dt={wave.preamble['x_increment']:.6g} s; "
                   f"fehlend={wave.missing.sum()}, abgeschnitten={(wave.clipped_low | wave.clipped_high).sum()}")
-        path = Path(args.output)
-        if path.suffix.lower() != ".npz":
-            path = path.with_suffix(".npz")
-        if path.exists() or path.with_suffix(".json").exists():
-            raise FileExistsError(f"Datei existiert bereits: {path}. Anderen --output wählen.")
-        metadata = {"resource": args.resource, "idn": scope.idn,
-                    "settings_after_capture": scope.status(),
-                    "waveforms": {ch: wave.preamble for ch, wave in waves.items()}}
-        np.savez_compressed(path, **arrays)
-        path.with_suffix(".json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        print(f"Gespeichert: {path} und {path.with_suffix('.json')}")
     if args.plot and (args.read or args.capture):
         import matplotlib.pyplot as plt
         fig, axes = plt.subplots(len(waves), 1, sharex=True, squeeze=False)
@@ -78,6 +68,7 @@ def main():
         axes[-1, 0].set_xlabel("Zeit relativ zur Gerätezeitreferenz / µs")
         fig.tight_layout()
         plt.show()
+    return waves
 
 
 if __name__ == "__main__":

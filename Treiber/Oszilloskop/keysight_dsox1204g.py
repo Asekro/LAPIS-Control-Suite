@@ -1,8 +1,8 @@
-"""Keysight DSOX1204G: USB/LAN, SCPI über PyVISA. Python >= 3.10.
+"""Keysight DSOX1204G: USB/LAN, SCPI via PyVISA. Python >= 3.10.
 
-Gerätetreiber ohne GUI, Plotting, Dateiexport oder Laser-Messablauf.
-Grundlage: Keysight 9018-07747, Rev. 02.12.0000, September 2021.
-Alle Größen in SI: s, V, Hz. Kein automatischer Reset oder Generatorstart.
+Device driver without GUI, plotting, file export, or laser measurement workflows.
+Reference: Keysight 9018-07747, Rev. 02.12.0000, September 2021.
+All quantities use SI units: s, V, Hz. No automatic reset or generator start.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -18,16 +18,16 @@ log = logging.getLogger(__name__)
 
 
 class ScopeError(RuntimeError):
-    """Gerätezustand, SCPI-Fehler oder unerwartete Antwort."""
+    """Invalid device state, SCPI error, or unexpected response."""
 
 
 class AcquisitionTimeout(TimeoutError):
-    """Keine vollständig abgeschlossene neue Aufnahme innerhalb der Wartezeit."""
+    """A new acquisition or trigger readiness was not confirmed before timeout."""
 
 
 @dataclass
 class Waveform:
-    """Eine Kurve; Rohcodes und Übertragungsmetadaten bleiben erhalten."""
+    """One waveform, preserving raw codes and transfer metadata."""
     channel: int
     time_s: np.ndarray
     voltage_v: np.ndarray
@@ -40,41 +40,41 @@ class Waveform:
 
 def _number(value, name, minimum=None, maximum=None):
     if isinstance(value, (bool, str)):
-        raise ValueError(f"{name}: eine endliche Zahl angeben.")
+        raise ValueError(f"{name}: provide a finite number.")
     v = float(value)
     if not math.isfinite(v) or (minimum is not None and v < minimum) or (
         maximum is not None and v > maximum
     ):
-        raise ValueError(f"{name}: unzulässiger Wert {value!r}.")
+        raise ValueError(f"{name}: invalid value {value!r}.")
     return v
 
 
 def _channel(value):
     if isinstance(value, bool) or not isinstance(value, int) or value not in (1, 2, 3, 4):
-        raise ValueError("Kanal muss eine ganze Zahl von 1 bis 4 sein.")
+        raise ValueError("Channel must be an integer from 1 to 4.")
     return value
 
 
 def _choice(value, allowed, name):
     v = str(value).upper()
     if v not in allowed:
-        raise ValueError(f"{name}: eine dieser Optionen wählen: {', '.join(allowed)}")
+        raise ValueError(f"{name}: choose one of: {', '.join(allowed)}")
     return v
 
 
 def _boolean(value):
     if not isinstance(value, bool):
-        raise ValueError("True oder False angeben.")
+        raise ValueError("Provide True or False.")
     return int(value)
 
 
 class KeysightDSOX1204G:
-    """Eine explizit gewählte VISA-Ressource, optional ein gemeinsamer Manager.
+    """An explicit VISA resource, optionally using a shared resource manager.
 
-    Verbindung im Konstruktor; per `with` oder `close()` schließen.
-    `*IDN?` muss DSOX1204G melden. Andere Modelle sind bewusst nicht freigegeben.
-    Der Lock verhindert verschachtelte Befehle innerhalb dieser Instanz.
-    Einen Treiber pro Gerät verwenden; keine parallele Bedienung am Frontpanel.
+    The constructor connects; use `with` or `close()` to release the connection.
+    `*IDN?` must identify a DSOX1204G. Other models are not supported.
+    The lock serializes command sequences within this instance.
+    Use one driver per device and avoid concurrent front-panel operations.
     """
     def __init__(self, resource: str, *, timeout_ms=5000, visa_backend="",
                  resource_manager=None):
@@ -109,11 +109,11 @@ class KeysightDSOX1204G:
     def _validate_idn(idn):
         fields = idn.split(",")
         if len(fields) < 4 or fields[1].strip().upper() != "DSOX1204G":
-            raise ScopeError(f"DSOX1204G erwartet, erhalten: {idn!r}")
+            raise ScopeError(f"Expected DSOX1204G, received: {idn!r}")
 
     @staticmethod
     def list_resources(visa_backend=""):
-        """Ressourcen auflisten, keine Geräte öffnen oder Ausgänge verändern."""
+        """List resources without opening instruments or changing outputs."""
         rm = pyvisa.ResourceManager(visa_backend)
         try:
             return rm.list_resources()
@@ -129,14 +129,14 @@ class KeysightDSOX1204G:
         except Exception:
             if exc_type is None:
                 raise
-            log.exception("Zusätzlicher Fehler beim Schließen des Oszilloskops")
+            log.exception("Additional error while closing the oscilloscope")
         return False
 
     def close(self):
-        """Benutzten WaveGen ausschalten; eine unberührte Ausgabe bleibt unverändert.
+        """Disable WaveGen if used by this instance; otherwise leave it unchanged.
 
-        Bei Verbindungsverlust ist OFF nur ein Versuch, keine Abschaltgarantie.
-        Ein Fehler wird nach dem Freigeben der Ressourcen weitergegeben.
+        After connection loss, OFF is an attempt, not a shutdown guarantee.
+        Any error is propagated after resources have been released.
         """
         with self._lock:
             if self._inst is None:
@@ -146,7 +146,7 @@ class KeysightDSOX1204G:
                 if self._wavegen_touched:
                     inst.write(":WGEN:OUTPut OFF")
                     if self._io_failed or inst.query(":WGEN:OUTPut?").strip() != "0":
-                        raise ScopeError("WaveGen-Abschaltung nicht bestätigt; Gerät prüfen.")
+                        raise ScopeError("WaveGen shutdown not confirmed; check the device.")
             finally:
                 try:
                     inst.close()
@@ -156,9 +156,9 @@ class KeysightDSOX1204G:
 
     def _check_connection(self):
         if self._inst is None:
-            raise ScopeError("Verbindung ist geschlossen.")
+            raise ScopeError("Connection is closed.")
         if self._io_failed:
-            raise ScopeError("Kommunikation nach I/O-Fehler gesperrt. recover() oder neu verbinden.")
+            raise ScopeError("Communication blocked after an I/O error. Call recover() or reconnect.")
 
     def _io(self, method, *args, **kwargs):
         self._check_connection()
@@ -171,10 +171,10 @@ class KeysightDSOX1204G:
             raise
 
     def write_scpi(self, command: str):
-        """Ungeprüfter SCPI-Zugriff für Erweiterungen; kann Gerätezustand ändern.
+        """Unchecked SCPI access for extensions; may change the device state.
 
-        Eigene SCPI-Änderungen nicht mit laufenden Treiberabläufen mischen.
-        Danach check_errors() aufrufen. Rückantworten stets vollständig lesen.
+        Do not mix custom SCPI changes with active driver workflows.
+        Call check_errors() afterwards. Always read responses completely.
         """
         with self._lock:
             log.debug("SCPI >> %s", command)
@@ -188,14 +188,14 @@ class KeysightDSOX1204G:
             return result
 
     def recover(self):
-        """Explizit I/O-Puffer leeren, Aufnahme stoppen, benutzten WaveGen abschalten.
+        """Explicitly clear I/O buffers, stop acquisition, and disable WaveGen if used.
 
-        Bricht auch ein wartendes DIGitize ab. Vorhandene Aufnahme wird nicht als
-        neue Aufnahme anerkannt. TTL muss anschließend neu konfiguriert werden.
+        Also aborts a pending DIGitize. An existing acquisition is not accepted
+        as a new acquisition. TTL must be configured again afterwards.
         """
         with self._lock:
             if self._inst is None:
-                raise ScopeError("Verbindung ist geschlossen.")
+                raise ScopeError("Connection is closed.")
             self._io_failed = True
             self._single_pending = False
             self._ttl_config = None
@@ -218,7 +218,7 @@ class KeysightDSOX1204G:
             self._inst.timeout = previous
 
     def read_errors(self):
-        """Fehlerqueue auslesen und dabei leeren; maximal 31 Einträge."""
+        """Read and drain the error queue, querying at most 31 entries."""
         with self._lock:
             errors = []
             for _ in range(31):
@@ -227,16 +227,16 @@ class KeysightDSOX1204G:
                     code, message = answer.split(",", 1)
                     code = int(code)
                 except ValueError as exc:
-                    raise ScopeError(f"Ungültige Fehlerantwort: {answer!r}") from exc
+                    raise ScopeError(f"Invalid error response: {answer!r}") from exc
                 if code == 0:
                     return errors
                 errors.append((code, message.strip().strip('"')))
-            raise ScopeError(f"Fehlerqueue wird nicht leer: {errors}")
+            raise ScopeError(f"Error queue did not empty: {errors}")
 
     def check_errors(self):
         errors = self.read_errors()
         if errors:
-            raise ScopeError(f"SCPI-Fehler (ggf. bereits vorher vorhanden): {errors}")
+            raise ScopeError(f"SCPI errors (possibly pre-existing): {errors}")
 
     def _commands(self, commands):
         for command in commands:
@@ -246,10 +246,10 @@ class KeysightDSOX1204G:
     def configure_channel(self, channel, *, scale_v=None, offset_v=None,
                           probe=None, coupling=None, enabled=None, invert=None,
                           bandwidth_limit=None):
-        """Nur angegebene Werte ändern. scale_v ist V/div, probe z.B. 1 oder 10.
+        """Change only supplied settings. scale_v is V/div; probe is e.g. 1 or 10.
 
-        DSOX1204G besitzt ausschließlich 1-MOhm-Kanaleingänge. Die 50-Ohm-
-        WaveGen-Last ist eine davon unabhängige Einstellung.
+        The DSOX1204G has only 1-megohm channel inputs. The 50-ohm WaveGen
+        load setting is independent of the channel input impedance.
         """
         ch = _channel(channel)
         values = []
@@ -269,7 +269,7 @@ class KeysightDSOX1204G:
             self._commands([f":CHANnel{ch}:{key} {value}" for key, value in values])
 
     def configure_timebase(self, *, scale_s, position_s=0.0, reference="CENTer"):
-        """MAIN-Zeitbasis; scale_s in s/div, position_s relativ zum Trigger."""
+        """Set MAIN timebase: scale_s in s/div, position_s relative to the trigger."""
         scale = _number(scale_s, "scale_s", 1e-15)
         position = _number(position_s, "position_s")
         ref = _choice(reference, ("LEFT", "CENTER", "RIGHT"), "reference")
@@ -281,7 +281,7 @@ class KeysightDSOX1204G:
     def configure_edge_trigger(self, channel, *, level_v, slope="POSitive",
                                sweep="NORMal", coupling="DC", noise_reject=False,
                                holdoff_s=None):
-        """OptoSync auf CH1–CH4; NORMAL vermeidet künstliche Auto-Trigger."""
+        """Set an edge trigger on CH1-CH4; NORMAL prevents automatic triggers."""
         ch = _channel(channel)
         level = _number(level_v, "level_v")
         slope = _choice(slope, ("POSITIVE", "NEGATIVE", "EITHER", "ALTERNATE"), "slope")
@@ -300,16 +300,16 @@ class KeysightDSOX1204G:
             self._commands(commands)
 
     def configure_acquisition(self, kind="NORMal", *, averages=16):
-        """NORMAL, HRESOLUTION oder AVERAGE; Echtzeitmodus ohne Segmente.
+        """Select NORMAL, HRESOLUTION, or AVERAGE in non-segmented real-time mode.
 
-        PEAK wird nicht angeboten, da Min/Max-Paare eigene Zeitachsen benötigen.
-        AVERAGE mit digitize() aufnehmen; Single ist für einen Trigger gedacht.
+        PEAK is unsupported because min/max pairs need their own time axes.
+        Use digitize() for AVERAGE; Single is intended for one acquisition.
         """
         kind = _choice(kind, ("NORMAL", "HRESOLUTION", "AVERAGE"), "kind")
         commands = [":ACQuire:MODE RTIMe", f":ACQuire:TYPE {kind}"]
         if kind == "AVERAGE":
             if isinstance(averages, bool) or not isinstance(averages, int) or not 2 <= averages <= 65536:
-                raise ValueError("averages: ganze Zahl von 2 bis 65536.")
+                raise ValueError("averages: integer from 2 to 65536.")
             commands.append(f":ACQuire:COUNt {averages}")
         with self._lock:
             self._commands(commands)
@@ -330,19 +330,19 @@ class KeysightDSOX1204G:
                 "waiting_for_trigger": bool(value & 32)}
 
     def arm_single(self):
-        """Stoppen, alte Triggerereignisse löschen, eine neue Aufnahme starten.
+        """Stop, clear stale trigger events, and arm a new acquisition.
 
-        Kehrt ohne Warten auf den Schuss zurück. Danach wait_until_armed(),
-        ggf. externen Schuss auslösen, wait_for_single() und read_waveforms().
+        Returns without waiting for the trigger. Then call wait_until_armed(),
+        supply the trigger signal if needed, wait_for_single(), and read_waveforms().
         """
         with self._lock:
             if self.query_scpi(":ACQuire:TYPE?") not in ("NORM", "HRES"):
-                raise ScopeError("Single-Workflow benötigt NORMAL oder HRESOLUTION.")
+                raise ScopeError("Single acquisition requires NORMAL or HRESOLUTION.")
             if self.query_scpi(":ACQuire:MODE?") != "RTIM":
-                raise ScopeError("Single-Workflow benötigt RTIME, keine Segmente.")
+                raise ScopeError("Single acquisition requires RTIME, not segmented mode.")
             self.stop()
             self._commands([":TRIGger:SWEep NORMal"])
-            self.query_scpi(":TER?")  # clear-on-read, keine alten Trigger akzeptieren
+            self.query_scpi(":TER?")  # Clear on read; do not accept stale triggers.
             self.query_scpi(":AER?")
             self._trigger_seen = False
             self.write_scpi(":SINGle")
@@ -354,13 +354,13 @@ class KeysightDSOX1204G:
         poll = _number(poll_s, "poll_s", 0.001, 1)
         with self._lock:
             if not self._single_pending:
-                raise ScopeError("Zuerst arm_single() aufrufen.")
+                raise ScopeError("Call arm_single() first.")
             deadline = time.monotonic() + timeout
             try:
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise AcquisitionTimeout("Keine neue Aufnahme/Triggerbereitschaft innerhalb der Wartezeit.")
+                        raise AcquisitionTimeout("No new acquisition or trigger readiness before timeout.")
                     with self._timeout(min(remaining, 1.0)):
                         if armed_only:
                             if int(self.query_scpi(":AER?")):
@@ -379,23 +379,23 @@ class KeysightDSOX1204G:
                     try:
                         self.stop()
                     except Exception:
-                        log.exception("Aufnahme nach Fehler nicht bestätigt gestoppt")
+                        log.exception("Acquisition stop not confirmed after an error")
                 raise
 
     def wait_until_armed(self, timeout_s=5.0, poll_s=0.01):
-        """Wartet auf frisches AER-Ereignis. Kein Garantiezeitpunkt für externes Signal."""
+        """Wait for a fresh AER event; this does not guarantee external signal timing."""
         self._wait_single(timeout_s, poll_s, True)
 
     def wait_for_single(self, timeout_s=10.0, poll_s=0.02):
-        """Erfordert frisches TER-Ereignis UND gestopptes Gerät; keine alten Daten."""
+        """Require a fresh TER event AND a stopped device; never accept stale data."""
         self._wait_single(timeout_s, poll_s, False)
 
     def digitize(self, channels=(1, 2), *, timeout_s=10.0):
-        """Blockierende Aufnahme, auch für Mittelung; wartet auf externe Trigger.
+        """Blocking acquisition, including averaging; waits for the configured trigger.
 
-        Während DIGitize puffert das Gerät weitere SCPI-Befehle. Hier deshalb
-        KEINEN WaveGen-Start über dieselbe Verbindung erwarten. Für den getrennten
-        Arm/Schuss-Ablauf arm_single() verwenden. Nach I/O-Timeout recover().
+        The device buffers further SCPI commands during DIGitize. Do not expect
+        a WaveGen start over the same connection while waiting. Use arm_single()
+        to separate arming from signal generation. Call recover() after an I/O timeout.
         """
         channels = self._channels(channels)
         timeout = _number(timeout_s, "timeout_s", 0.001)
@@ -407,14 +407,14 @@ class KeysightDSOX1204G:
             with self._timeout(timeout):
                 self.write_scpi(f":DIGitize {sources}")
                 if self.query_scpi("*OPC?") != "1":
-                    raise ScopeError("Unerwartete OPC-Antwort.")
+                    raise ScopeError("Unexpected OPC response.")
             self.check_errors()
 
     @staticmethod
     def _channels(channels):
         result = tuple(_channel(ch) for ch in channels)
         if not result or len(result) != len(set(result)):
-            raise ValueError("Mindestens einen Kanal, jeden Kanal nur einmal angeben.")
+            raise ValueError("Provide at least one channel, with no duplicates.")
         return result
 
     def read_waveform(self, channel, **kwargs):
@@ -422,13 +422,13 @@ class KeysightDSOX1204G:
 
     def read_waveforms(self, channels=(1, 2), *, points=2000000, format="WORD",
                        points_mode="AUTO", stop=True):
-        """Kurven aus derselben gestoppten Aufnahme; keine erneute Aufnahme.
+        """Read waveforms from the same stopped acquisition without acquiring again.
 
-        WORD (Standard), BYTE oder ASCII. AUTO wählt RAW für NORMAL/HRES und
-        NORMAL für Mittelung. points ist eine Anforderung; tatsächliche Länge
-        kommt aus der Preamble. Keine Garantie für 2 Mio. übertragene Punkte.
-        stop=False verlangt ein bereits gestopptes Gerät. Aktivierte Kanäle
-        VOR der Aufnahme wählen; diese Methode schaltet keine Kanäle hinzu.
+        Supports WORD (default), BYTE, or ASCII. AUTO selects RAW for NORMAL/HRES
+        and NORMAL for averaging. points is a request; the actual length comes
+        from the preamble. A transfer of two million points is not guaranteed.
+        stop=False requires an already stopped device. Enable channels BEFORE
+        acquisition; this method does not enable additional channels.
         """
         channels = self._channels(channels)
         fmt = _choice(format, ("WORD", "BYTE", "ASCII"), "format")
@@ -436,30 +436,30 @@ class KeysightDSOX1204G:
         allowed = (100, 250, 500, 1000, 2000, 5000, 10000, 20000,
                    50000, 100000, 200000, 500000, 1000000, 2000000)
         if isinstance(points, bool) or not isinstance(points, int) or points not in allowed:
-            raise ValueError(f"points muss einer dieser Werte sein: {allowed}")
+            raise ValueError(f"points must be one of: {allowed}")
         _boolean(stop)
         with self._lock:
             if self._single_pending:
-                raise ScopeError("Neue Aufnahme noch nicht bestätigt: zuerst wait_for_single().")
+                raise ScopeError("New acquisition not yet confirmed: call wait_for_single() first.")
             if stop:
                 self.stop()
             if self.operation_status()["running"]:
-                raise ScopeError("Für konsistente Daten muss das Gerät gestoppt sein.")
+                raise ScopeError("The device must be stopped for consistent data.")
             kind = self.query_scpi(":ACQuire:TYPE?")
             if kind not in ("NORM", "HRES", "AVER"):
-                raise ScopeError("PEAK-Daten werden wegen ihrer Min/Max-Paare nicht als normale Kurve gelesen.")
+                raise ScopeError("PEAK data contains min/max pairs and cannot be read as a regular waveform.")
             if self.query_scpi(":ACQuire:MODE?") != "RTIM":
-                raise ScopeError("Segmentierte Daten werden von dieser Methode nicht unterstützt.")
+                raise ScopeError("This method does not support segmented data.")
             if self.query_scpi(":TIMebase:MODE?") != "MAIN":
-                raise ScopeError("Vor der Aufnahme TIMebase MAIN wählen.")
+                raise ScopeError("Select TIMebase MAIN before acquisition.")
             mode = ("NORMAL" if kind == "AVER" else "RAW") if mode == "AUTO" else mode
             if mode == "RAW" and kind == "AVER":
-                raise ScopeError("RAW ist bei AVERAGE nicht verfügbar; points_mode='NORMAL' verwenden.")
+                raise ScopeError("RAW is unavailable for AVERAGE; use points_mode='NORMAL'.")
             count = min(points, 1000) if mode == "NORMAL" else points
             result = {}
             for ch in channels:
                 if self.query_scpi(f":CHANnel{ch}:DISPlay?") != "1":
-                    raise ScopeError(f"CH{ch} ist nicht eingeblendet. Vor der Aufnahme aktivieren.")
+                    raise ScopeError(f"CH{ch} is not displayed. Enable it before acquisition.")
                 self._commands([f":WAVeform:SOURce CHANnel{ch}",
                                 f":WAVeform:FORMat {fmt}", ":WAVeform:UNSigned ON",
                                 ":WAVeform:BYTeorder LSBFirst",
@@ -467,27 +467,27 @@ class KeysightDSOX1204G:
                                 f":WAVeform:POINts {count}"])
                 fields = self.query_scpi(":WAVeform:PREamble?").split(",")
                 if len(fields) != 10:
-                    raise ScopeError(f"Ungültige Preamble: {fields}")
+                    raise ScopeError(f"Invalid preamble: {fields}")
                 vals = [float(v) for v in fields]
                 if not all(math.isfinite(v) for v in vals):
-                    raise ScopeError("Nicht-endliche Preamble-Werte.")
+                    raise ScopeError("Non-finite preamble values.")
                 keys = ("format", "type", "points", "count", "x_increment", "x_origin",
                         "x_reference", "y_increment", "y_origin", "y_reference")
                 p = dict(zip(keys, vals))
                 if p["format"] != {"BYTE": 0, "WORD": 1, "ASCII": 4}[fmt] or p["type"] == 1:
-                    raise ScopeError("Datenformat oder Acquisition-Typ unerwartet.")
+                    raise ScopeError("Unexpected data format or acquisition type.")
                 if p["x_increment"] <= 0 or p["points"] < 1 or not p["points"].is_integer():
-                    raise ScopeError("Ungültige Zeitbasis oder Punktzahl in der Preamble.")
+                    raise ScopeError("Invalid timebase or point count in the preamble.")
                 if fmt == "ASCII":
                     raw = np.asarray(self._io("query_ascii_values", ":WAVeform:DATA?",
                                               container=np.array), dtype=float)
-                    voltage = raw.copy()  # ASCII ist bereits in Volt!
+                    voltage = raw.copy()  # ASCII values are already in volts.
                     missing = ~np.isfinite(raw) | (np.abs(raw) > 1e30)
                     low = np.zeros(raw.size, dtype=bool)
-                    high = low.copy()  # ASCII liefert keine eindeutigen Clipping-Codes
+                    high = low.copy()  # ASCII provides no unambiguous clipping codes.
                 else:
                     old_term = self._inst.read_termination
-                    self._inst.read_termination = None  # 0x0A im Binärpayload nicht als Ende deuten
+                    self._inst.read_termination = None  # Do not treat 0x0A in binary data as termination.
                     try:
                         raw = np.asarray(self._io(
                             "query_binary_values", ":WAVeform:DATA?",
@@ -500,18 +500,18 @@ class KeysightDSOX1204G:
                     missing, low = raw == 0, raw == 1
                     high = raw == (65535 if fmt == "WORD" else 255)
                 if raw.ndim != 1 or raw.size != int(p["points"]):
-                    raise ScopeError(f"Unvollständige Übertragung: {raw.size} statt {p['points']:.0f} Punkte.")
+                    raise ScopeError(f"Incomplete transfer: {raw.size} instead of {p['points']:.0f} points.")
                 voltage[missing] = np.nan
                 time_s = (np.arange(raw.size) - p["x_reference"]) * p["x_increment"] + p["x_origin"]
                 if np.any(low | high):
-                    log.warning("CH%s enthält am Anzeigebereich abgeschnittene Werte.", ch)
+                    log.warning("CH%s contains values clipped at the display range limits.", ch)
                 p.update(transfer_format=fmt, points_mode=mode, acquisition_type=kind)
                 result[ch] = Waveform(ch, time_s, voltage, raw, p, missing, low, high)
             self.check_errors()
             return result
 
     def wavegen_state(self):
-        """Zurückgelesene Einstellungen, keine Messung der realen Ausgangsspannung."""
+        """Read back settings, not a measurement of the actual output voltage."""
         with self._lock:
             return {
                 "output": bool(int(self.query_scpi(":WGEN:OUTPut?"))),
@@ -528,12 +528,12 @@ class KeysightDSOX1204G:
 
     def configure_ttl(self, *, load, frequency_hz=1.0, pulse_width_s=100e-6,
                       low_v=0.0, high_v=5.0):
-        """Periodischen Pulse-WaveGen konfigurieren, Ausgang bleibt AUS.
+        """Configure a periodic WaveGen pulse train, leaving the output OFF.
 
-        load zwingend 'HIGHZ' oder '50OHM': erst reale Laserlast klären!
-        5 Vss plus 2.5 V Offset ergibt 0..5 V bei korrekt angegebener Last.
-        Werte werden zurückgelesen; Begrenzung/Rundung wird geprüft.
-        Dies ist kein Hardware-Burst und kein garantierter Einzelpuls.
+        load must be 'HIGHZ' or '50OHM': verify the actual connected load first.
+        5 V peak-to-peak with a 2.5 V offset gives 0..5 V at the specified load.
+        Settings are read back and checked for clamping or rounding.
+        This is not a hardware burst or a guaranteed single pulse.
         """
         load = _choice(load, ("HIGHZ", "50OHM"), "load")
         freq = _number(frequency_hz, "frequency_hz", 0.1, 10e6)
@@ -541,13 +541,13 @@ class KeysightDSOX1204G:
         low = _number(low_v, "low_v", 0, 5)
         high = _number(high_v, "high_v", 0, 5)
         if high <= low:
-            raise ValueError("high_v muss größer als low_v sein.")
+            raise ValueError("high_v must be greater than low_v.")
         config = dict(frequency_hz=freq, pulse_width_s=width, low_v=low, high_v=high,
                       load="ONEM" if load == "HIGHZ" else "FIFT")
         with self._lock:
             self._ttl_config = None
             self._wavegen_touched = True
-            self.wavegen_output(False)  # OFF bestätigen, bevor Parameter geändert werden
+            self.wavegen_output(False)  # Confirm OFF before changing settings.
             self._commands([
                 ":WGEN:MODulation:STATe OFF",
                 ":WGEN:MODulation:NOISe 0", ":WGEN:OUTPut:POLarity NORMal",
@@ -562,7 +562,7 @@ class KeysightDSOX1204G:
             actual = self.wavegen_state()
             self._verify_ttl(actual, config)
             if actual["output"]:
-                raise ScopeError("WaveGen sollte nach Konfiguration AUS sein.")
+                raise ScopeError("WaveGen should be OFF after configuration.")
             self.check_errors()
             self._ttl_config = config
             return actual
@@ -571,45 +571,45 @@ class KeysightDSOX1204G:
     def _verify_ttl(actual, expected):
         if (actual["function"] != "PULS" or actual["polarity"] != "NORM"
                 or actual["modulation"] or actual["noise_percent"] != 0):
-            raise ScopeError(f"WaveGen-Konfiguration unerwartet: {actual}")
+            raise ScopeError(f"Unexpected WaveGen configuration: {actual}")
         for key, target in expected.items():
             if isinstance(target, str):
                 ok = actual[key] == target
             else:
-                # Frequenzauflösung 0.1 Hz; Pulsbreite 10 ns; Pegel 1 mV.
+                # Resolution: frequency 0.1 Hz; pulse width 10 ns; voltage 1 mV.
                 abs_tol = {"frequency_hz": 0.051, "pulse_width_s": 5.1e-9,
                            "low_v": 0.0011, "high_v": 0.0011}[key]
                 ok = math.isclose(actual[key], target, rel_tol=1e-4, abs_tol=abs_tol)
             if not ok:
-                raise ScopeError(f"WaveGen {key}: angefordert {target}, erhalten {actual[key]}")
+                raise ScopeError(f"WaveGen {key}: requested {target}, received {actual[key]}")
 
     def wavegen_output(self, enabled: bool):
-        """True startet eine Pulsfolge; False schaltet aus. Kein Einzelpulsbefehl."""
+        """True starts a pulse train; False disables output. Not a single-pulse command."""
         value = _boolean(enabled)
         with self._lock:
             if enabled:
                 if self._ttl_config is None:
-                    raise ScopeError("Zuerst configure_ttl(load=...) erfolgreich ausführen.")
+                    raise ScopeError("Complete configure_ttl(load=...) successfully first.")
                 self._verify_ttl(self.wavegen_state(), self._ttl_config)
                 self.check_errors()
             self._wavegen_touched = True
             try:
                 self.write_scpi(f":WGEN:OUTPut {value}")
                 if bool(int(self.query_scpi(":WGEN:OUTPut?"))) != enabled:
-                    raise ScopeError("WaveGen-Ausgangszustand nicht bestätigt.")
+                    raise ScopeError("WaveGen output state not confirmed.")
                 self.check_errors()
             except BaseException:
                 if enabled:
-                    # Nach fehlgeschlagenem Einschalten sofort OFF versuchen,
-                    # auch bei gesperrtem I/O. Keine erneute Trigger-Ausgabe.
+                    # Attempt OFF immediately after a failed enable, even with
+                    # regular I/O blocked. Do not retry pulse output.
                     try:
                         self._inst.write(":WGEN:OUTPut OFF")
                     except Exception:
-                        log.exception("WaveGen-Abschaltversuch fehlgeschlagen; Gerät prüfen")
+                        log.exception("WaveGen shutdown attempt failed; check the device")
                 raise
 
     def status(self):
-        """Grundzustand und Messparameter lesen, ohne Reset oder Ausgabeänderung."""
+        """Read basic status and measurement settings without resetting or changing outputs."""
         with self._lock:
             return dict(
                 idn=self.idn, operation=self.operation_status(),
