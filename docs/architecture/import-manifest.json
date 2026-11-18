@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/Asekro/LA-TOF-MS-ControlSuite",
+  "commit": "01e430b93934e197204fc581cfde58206cd84669",
+  "imported_on": "2026-11-18",
+  "source_directory": "docs/architecture",
+  "hash_algorithm": "git-blob-sha1",
+  "files": {
+    "ADR-001-gui-framework.md": "6524118b9e1421da3652ec900adbb0066b1df93d",
+    "ADR-002-device-interface.md": "440d3687be3534da7228c9cc7386ba178b6a3194",
+    "ADR-003-simulation-mode.md": "1d90fec40a59d32a643e006285feb33e9e59736d",
+    "ADR-004-language.md": "0dcedf7fd568f1550da7bb5f4d1f97b97d98913f",
+    "ADR-005-device-configuration.md": "39210a18f33bdb6c457c4e3213068af717612d98"
+  }
+}
