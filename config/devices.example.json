@@ -41,7 +41,7 @@
       "write_timeout_s": 1.0,
       "minimum_command_delay_s": 0.1,
       "command_handshake": true,
-      "handshake_interface": null
+      "handshake_interface": "USB"
     }
   }
 }

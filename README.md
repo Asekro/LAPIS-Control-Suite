@@ -23,7 +23,7 @@ LAPIS-Control-Suite/
 │   ├── devices/
 │   │   ├── base_device.py        Optionale minimale Basis, keine Pflichtvererbung
 │   │   ├── bender/               Treiber, Notebook, Dokumentation und tests/
-│   │   ├── laser/                Treiber und Dokumentation
+│   │   ├── laser/                Treiber, Notebook, Dokumentation und tests/
 │   │   └── oscilloscope/         Treiber, Notebook, Dokumentation und tests/
 │   ├── gui/                     Bereich für die spätere PySide6-Oberfläche
 │   └── workflows/               Bereich für geräteübergreifende Messabläufe
@@ -56,7 +56,7 @@ Python-Paketinstallation erforderlich. Details: [Einrichtung](docs/development/s
 |---|---|---|
 | Bender / iseg NHS | [README](src/lapis_control/devices/bender/README.md) | [test_bender.ipynb](src/lapis_control/devices/bender/test_bender.ipynb) |
 | Keysight DSOX1204G | [README](src/lapis_control/devices/oscilloscope/README.md) | [test_oscilloscope.ipynb](src/lapis_control/devices/oscilloscope/test_oscilloscope.ipynb) |
-| Coherent Flare NX | [README](src/lapis_control/devices/laser/README.md) | Noch kein Hardware-Testnotebook |
+| Coherent Flare NX | [README](src/lapis_control/devices/laser/README.md) | [test_laser.ipynb](src/lapis_control/devices/laser/test_laser.ipynb) |
 
 Alle vorhandenen Offline-Regressionstests gemeinsam, ohne Gerätezugriff:
 
@@ -101,7 +101,7 @@ Kommunikationsparameter. Eine lokale Kopie `config/devices.local.json` wird von 
 ignoriert. `lapis_control.configuration.load_devices(path)` prüft die gewählte
 Datei und erzeugt unverbundene Geräteobjekte. Feste Protokollwerte werden gegen
 die unterstützten Treiberprofile geprüft; Ports und Timeouts werden übernommen.
-Beide Notebooks wählen die Datei über `CONFIG_PATH`. Details und ein Beispiel
+Die Geräte-Notebooks wählen die Datei über `CONFIG_PATH`. Details und ein Beispiel
 stehen in der [Konfigurationsanleitung](config/README.md).
 
 Dokumentation und Notebook-Erklärungen sind Deutsch; Programmbezeichner,

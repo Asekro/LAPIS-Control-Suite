@@ -1,8 +1,8 @@
 # Aufbau und Kommunikation konfigurieren
 
 `devices.example.json` hält Anschlussdaten und Kommunikationsparameter zentral
-fest. Eingetragen sind Bender COM12/COM11, der bisher getestete Scope und der vom
-Benutzer eingetragene Laser-Port COM10. Den tatsächlichen Aufbau vor dem Verbinden prüfen.
+fest. Eingetragen sind Bender COM12/COM11, der bisher getestete Scope und der
+Flare NX an COM10 mit USB-Handshake. Den tatsächlichen Aufbau vor dem Verbinden prüfen.
 
 Für lokale Änderungen die Datei nach `devices.local.json` kopieren. Diese Kopie
 wird von Git ignoriert. Der Dateipfad wird ausdrücklich angegeben; es gibt keinen

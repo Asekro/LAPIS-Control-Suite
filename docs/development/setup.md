@@ -17,7 +17,7 @@ ist optional; die oben gezeigten expliziten Interpreterpfade funktionieren ohne
 
 In VS Code den Interpreter `.venv\Scripts\python.exe` wählen und denselben
 Interpreter als Notebook-Kernel verwenden. Die Notebooks liegen unter
-`src/lapis_control/devices/bender/` und `src/lapis_control/devices/oscilloscope/`.
+`src/lapis_control/devices/bender/`, `src/lapis_control/devices/laser/` und `src/lapis_control/devices/oscilloscope/`.
 Ihre Konfiguration erkennt den Projekt-Checkout auch aus dem Geräteordner.
 
 Optional für die spätere GUI:

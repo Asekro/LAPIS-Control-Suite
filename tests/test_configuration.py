@@ -36,6 +36,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(devices['bender'].positive.port, self.example['bender']['positive_port'])
         self.assertEqual(devices['bender'].positive.expected_serial, self.example['bender']['positive_serial'])
         self.assertEqual(devices['laser'].port, self.example['laser']['port'])
+        self.assertEqual(devices['laser'].handshake_interface, 'USB')
         self.assertEqual(devices['oscilloscope'].resource, self.example['oscilloscope']['resource'])
         for device in devices.values():
             device.close()

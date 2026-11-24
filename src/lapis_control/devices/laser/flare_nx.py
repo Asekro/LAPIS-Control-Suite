@@ -2,13 +2,13 @@
 Driver for the Coherent Flare NX Laser System over RS232 / virtual USB COM port.
 
 Revised: verified handshake transitions, OFF on close, single-shot mode selection.
-No hardware validation has been performed.
+USB status readout and OFF on close verified with firmware V3.0.24 and interlock open.
 
 Fixed settings (according to Flare NX Laser Operator's Manual, chapter 7, pp. 59-64):
 - 9600 baud (factory default)
 - 8N1 (8 data bits, no parity, 1 stop bit)
 - no RS232 hardware/software line flow control (only RXD, TXD, GND connected, p. 41)
-- Protocol command handshake enabled via 'SYST:COM:HAND on' (replies with 'OK\\r\\n', pp. 49, 62)
+- USB command handshake on the LAPIS controller: 'SYST:COM:HAND:USB on' (OEM section 8.1.5.1)
 - Timeout: 1.0 s
 - Command terminator: CR LF (0x0D 0x0A)
 - Minimum delay between commands: 100 ms (manual p. 49)
@@ -21,15 +21,18 @@ Fixed settings (according to Flare NX Laser Operator's Manual, chapter 7, pp. 59
 
 from __future__ import annotations
 
-import re
+import logging
 import math
-import warnings
+import re
 import threading
 import time
+from decimal import Decimal
+from enum import IntFlag
 from typing import Final, Optional
 
 import serial
 
+log = logging.getLogger(__name__)
 
 # Hardcoded serial connection parameters (manual section 7.1.1, page 59)
 BAUDRATE: Final[int] = 9600
@@ -46,6 +49,8 @@ ACK_RESPONSE = "OK"
 CMD_HANDSHAKE = "SYST:COM:HAND"
 CMD_LASER_ENABLE = "LD:SET:ENA"
 CMD_REMOTE_ENABLE = "LD:SET:REM"
+CMD_PULSE_MODE = "LD:PULS:MOD"
+CMD_SOFTWARE_TRIGGER = "LD:SET:TRI"
 CMD_HEAD_TEMP_READ = "TEMP:LMT:READ"
 # CMD_HEAD_TEMP_SET = "TEMP:LMT:SET"  # Commented out to prevent accidental setpoint changes
 
@@ -55,12 +60,31 @@ STATE_OFF = "off"
 VALID_HANDSHAKE_INTERFACES = {"SERIAL", "USB"}
 
 
+class SystemStatus(IntFlag):
+    """Controller status bits used by the single-shot test (OEM table 8-2)."""
+
+    FAULT = 0x01
+    WARM_UP = 0x02
+    STANDBY = 0x04
+    READY = 0x08
+    EMISSION = 0x10
+    TEMPERATURE_FAULT = 0x20
+    TRIGGER_INPUT = 0x40
+
+
+class SystemFault(IntFlag):
+    """Interlock indications in the controller fault register (OEM table 8-4)."""
+
+    INTERLOCK_FAULT = 0x00040000
+    INTERLOCK_OPEN = 0x00080000
+
+
 # ---------------------------------------------------------------------------
 # CUSTOM EXCEPTION HIERARCHY
 # ---------------------------------------------------------------------------
 
 
-# Error names transcribed from the supplied manual photo, Table 9-6.
+# Coherent User Command Set, "SCPI Errors"; OEM 1306058 AE, table 8-6.
 SCPI_ERRORS = {
     -600: "SCPI_ERROR_TIMEOUT",
     -610: "SCPI_ERROR_EXECUTION_TIMEOUT",
@@ -234,13 +258,8 @@ class FlareNx:
                     )
                 self._confirm_handshake(True)
                 self._ready = True
-            except BaseException:
-                try:
-                    self.close()
-                except Exception as cleanup_error:
-                    warnings.warn(
-                        f"Connection setup failed; shutdown also failed: {cleanup_error}"
-                    )
+            except BaseException as exc:
+                self._close_after_error(exc)
                 raise
         return self
 
@@ -275,15 +294,19 @@ class FlareNx:
         return self.connect()
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if exc_value is None:
+            self.close()
+        else:
+            self._close_after_error(exc_value)
+
+    def _close_after_error(self, error: BaseException) -> None:
+        """Attempt verified shutdown and preserve the error that caused it."""
         try:
             self.close()
         except Exception as cleanup_error:
-            if exc_value is None:
-                raise
-            # Keep the original failure, but make unconfirmed shutdown visible.
-            warnings.warn(f"Laser OFF could not be confirmed during cleanup: {cleanup_error}")
-            if hasattr(exc_value, "add_note"):
-                exc_value.add_note(f"Laser shutdown failed: {cleanup_error}")
+            log.error("Laser OFF could not be confirmed during cleanup: %s", cleanup_error)
+            if hasattr(error, "add_note"):
+                error.add_note(f"Laser shutdown failed: {cleanup_error}")
 
     # -----------------------------------------------------------------------
     # COMMAND BUILDING AND PARSING
@@ -438,7 +461,7 @@ class FlareNx:
         return self.query_parameter(self._handshake_command())
 
     def _handshake_command(self) -> str:
-        """Use the interface suffix documented in OEM manual section 9.1.5."""
+        """Use the interface suffix documented in OEM 1306058 AE, section 8.1.5.1."""
         if self.handshake_interface:
             return f"{CMD_HANDSHAKE}:{self.handshake_interface}"
         return CMD_HANDSHAKE
@@ -453,7 +476,7 @@ class FlareNx:
 
         According to the Flare NX manual:
         - Page 49 (Terminal Start-Up): 'SYST:COM:HAND on'
-        - OEM section 9.1.5 (explicit syntax): 'SYST:COM:HAND:SERIAL ON/OFF' or 'SYST:COM:HAND:USB ON/OFF'
+        - OEM section 8.1.5.1 (explicit syntax): 'SYST:COM:HAND:SERIAL ON/OFF' or 'SYST:COM:HAND:USB ON/OFF'
 
         Args:
             enabled: True to enable handshake ('on'), False to disable ('off').
@@ -530,16 +553,7 @@ class FlareNx:
         According to table 7-2 (page 63), both the old format ('1'/'0') and
         the new format ('ON'/'OFF') may be used by the controller.
         """
-        reply = self.query_parameter(CMD_LASER_ENABLE).strip().lower()
-
-        if reply in {"on", "1"}:
-            return True
-        if reply in {"off", "0"}:
-            return False
-
-        raise FlareNxProtocolError(
-            f"Invalid laser state received for {CMD_LASER_ENABLE}: {reply!r}"
-        )
+        return self._read_switch(CMD_LASER_ENABLE)
 
     def set_laser_enabled(self, enabled: bool) -> None:
         """
@@ -555,13 +569,16 @@ class FlareNx:
 
     def read_remote_enabled(self) -> bool:
         """Read the electrical remote-enable setting (OEM manual section 6.3.3)."""
-        reply = self.query_parameter(CMD_REMOTE_ENABLE).strip().lower()
+        return self._read_switch(CMD_REMOTE_ENABLE)
+
+    def _read_switch(self, command: str) -> bool:
+        reply = self.query_parameter(command).strip().lower()
         if reply in {"on", "1"}:
             return True
         if reply in {"off", "0"}:
             return False
         raise FlareNxProtocolError(
-            f"Invalid remote state received for {CMD_REMOTE_ENABLE}: {reply!r}"
+            f"Invalid switch state received for {command}: {reply!r}"
         )
 
     def _set_laser_enabled_locked(self, enabled: bool) -> None:
@@ -574,6 +591,10 @@ class FlareNx:
                     "laser enable/disable command was not sent."
                 )
 
+        self._write_laser_enabled(enabled)
+
+    def _write_laser_enabled(self, enabled: bool) -> None:
+        """Write ENA and verify it with the caller holding the lock and REM off."""
         target_value = STATE_ON if enabled else STATE_OFF
         self.write_parameter(CMD_LASER_ENABLE, target_value)
 
@@ -595,12 +616,12 @@ class FlareNx:
         self.set_laser_enabled(False)
 
     def read_pulse_mode(self) -> int:
-        reply = self.query_parameter("LD:PULS:MOD")
+        reply = self.query_parameter(CMD_PULSE_MODE)
         try:
             value = float(reply)
         except ValueError as exc:
             raise FlareNxProtocolError(f"Invalid pulse mode: {reply!r}") from exc
-        if value not in {2, 3, 5, 12}:
+        if value not in {0, 1, 2, 3, 5, 12}:
             raise FlareNxProtocolError(f"Unsupported pulse mode: {reply!r}")
         return int(value)
 
@@ -615,12 +636,95 @@ class FlareNx:
         with self._lock:
             self.turn_off()
 
-            if self.read_pulse_mode() == 3:
+            mode = self.read_pulse_mode()
+            if mode == 3:
                 return
+            if mode in {0, 1}:
+                raise FlareNxCommandError(f"Controller is in service mode {mode}; mode was not changed.")
 
-            self.write_parameter("LD:PULS:MOD", "3")
+            if self.read_system_status() & SystemStatus.TRIGGER_INPUT:
+                raise FlareNxCommandError("Trigger input is active; mode was not changed.")
+            self.write_parameter(CMD_PULSE_MODE, "3")
             if self.read_pulse_mode() != 3:
                 raise FlareNxCommandError("Single-shot mode was not accepted.")
+
+    def _read_register(self, command: str) -> int:
+        reply = self.query_parameter(command)
+        # The OEM examples display two four-digit words, e.g. "0000 0304".
+        if not re.fullmatch(r"(?:0[xX])?[0-9a-fA-F]{4}[ \t]*[0-9a-fA-F]{4}", reply):
+            raise FlareNxProtocolError(f"Invalid 32-bit hex register for {command}: {reply!r}")
+        return int("".join(reply.split()), 16)
+
+    def read_system_status(self) -> SystemStatus:
+        """Read SYST:STAT (OEM section 8.1.3.1), preserving all reported bits."""
+        return SystemStatus(self._read_register("SYST:STAT"))
+
+    def read_system_faults(self) -> SystemFault:
+        """Read SYST:FAUL without acknowledging or clearing any fault."""
+        return SystemFault(self._read_register("SYST:FAUL"))
+
+    def reset_interlock_fault(self) -> SystemFault:
+        """Acknowledge a latched interlock fault once after closure (OEM 5.2.4)."""
+        with self._lock:
+            if not self.is_connected:
+                raise FlareNxConnectionError("Interlock reset requires a verified handshake.")
+            faults = self.read_system_faults()
+            if faults & SystemFault.INTERLOCK_OPEN:
+                raise FlareNxCommandError("Interlock is still open; reset blocked.")
+            if not faults & SystemFault.INTERLOCK_FAULT:
+                return faults
+            if self.read_laser_enabled() or self.read_remote_enabled():
+                raise FlareNxCommandError("Interlock reset requires ENA and REM to be OFF.")
+            self.write_parameter("SYST:INT", "RESET")
+            faults = self.read_system_faults()
+            if faults & (SystemFault.INTERLOCK_OPEN | SystemFault.INTERLOCK_FAULT):
+                raise FlareNxCommandError(f"Interlock reset not confirmed (SYST:FAUL 0x{faults:08X}).")
+            return faults
+
+    def read_pulse_count(self) -> int:
+        """Read the resettable uint32 shot counter without changing it (OEM 6.3.7)."""
+        reply = self.query_parameter("HEAD:PULS:COUNT")
+        # Firmware V3.0.24 reports e.g. "2.1322 * 10^4" for 21322 shots.
+        match = re.fullmatch(
+            r"([0-9]{1,10}(?:\.[0-9]{1,10})?)(?:\s*\*\s*10\^([0-9]{1,2}))?"
+            r"(?:\s*(?:shots|\[shots\]))?", reply, re.IGNORECASE,
+        )
+        if match:
+            count = Decimal(f"{match[1]}e{match[2] or '0'}")
+            if count <= 0xFFFFFFFF and count == int(count):
+                return int(count)
+        raise FlareNxProtocolError(f"Invalid pulse counter: {reply!r}")
+
+    def arm_single_shot(self) -> None:
+        """Arm verified mode 3 for external TTL. Use inside a connected context.
+
+        The operator must keep the trigger low until arming completes. Status
+        queries are snapshots. Each subsequent qualifying edge can cause a shot.
+        """
+        with self._lock:
+            if not self.is_connected:
+                raise FlareNxConnectionError("Arming requires a verified command handshake.")
+            if self.read_pulse_mode() != 3:
+                raise FlareNxCommandError("Select and verify single-shot mode before arming.")
+            if self.read_laser_enabled() or self.read_remote_enabled():
+                raise FlareNxCommandError("Arming requires ENA and REM to be OFF.")
+            if self._read_switch(CMD_SOFTWARE_TRIGGER):
+                raise FlareNxCommandError("Software trigger is ON; external trigger test aborted.")
+            faults = self.read_system_faults()
+            if faults:
+                raise FlareNxCommandError(f"Controller fault register 0x{faults:08X}; arming blocked.")
+            status = self.read_system_status()
+            blocking = (SystemStatus.FAULT | SystemStatus.WARM_UP | SystemStatus.READY
+                        | SystemStatus.EMISSION | SystemStatus.TEMPERATURE_FAULT
+                        | SystemStatus.TRIGGER_INPUT)
+            if not status & SystemStatus.STANDBY or status & blocking:
+                raise FlareNxCommandError(f"Expected standby with trigger low, got 0x{status:08X}.")
+            try:
+                self._write_laser_enabled(True)
+            except BaseException as exc:
+                # A missing acknowledgement can mean the enable was already applied.
+                self._close_after_error(exc)
+                raise
 
     # -----------------------------------------------------------------------
     # LASER HEAD TEMPERATURE FUNCTIONS (TEMP:LMT:READ)
