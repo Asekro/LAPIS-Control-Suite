@@ -1,6 +1,6 @@
 """Offline tests. The fake models protocol behavior, not physical hardware."""
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from pathlib import Path
 import sys
 
@@ -9,7 +9,7 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 from lapis_control.devices.bender.iseg_nhs import (NHSModule, Bender, CommunicationError, DeviceError,
-                      PartialUpdateError, ProtocolError, parse_number, ChannelStatus)
+                      PartialUpdateError, ProtocolError, VerificationError, parse_number, ChannelStatus)
 
 class FakeSerial:
     def __init__(self, port, **kwargs):
@@ -21,6 +21,8 @@ class FakeSerial:
         self.echo = True
         self.drop = False
         self.volts = [0.] * 6
+        self.measurement_offset = 0.0
+        self.extra_status = ChannelStatus(0)
         self.on = [False] * 6
         self.mod_error = False
         self.reject_voltage = False
@@ -47,11 +49,15 @@ class FakeSerial:
         elif cmd == ':READ:FIRMWARE:NAME?': response = 'N06C2'
         elif cmd == ':READ:MODULE:CHANNELNUMBER?': response = '6'
         elif cmd.startswith(':READ:CHAN:STAT?'):
-            response = str(int(self.positive) + (8 if self.on[ch] else 0))
+            status = self.extra_status | (ChannelStatus.POSITIVE if self.positive else 0)
+            if self.on[ch]:
+                status |= ChannelStatus.ON | ChannelStatus.CONSTANT_VOLTAGE
+            response = str(int(status))
         elif cmd == ':READ:MODULE:STAT?': response = str(64 if self.mod_error else 30464)
         elif 'EVENT:STAT?' in cmd: response = '0'
         elif cmd.startswith(':READ:VOLT:NOM?'): response = '4.00000E3V'
-        elif cmd.startswith((':READ:VOLT?', ':MEAS:VOLT?')): response = f'{self.volts[ch]}V'
+        elif cmd.startswith(':READ:VOLT?'): response = f'{self.volts[ch]}V'
+        elif cmd.startswith(':MEAS:VOLT?'): response = f'{self.volts[ch] + self.measurement_offset}V'
         elif cmd.startswith(':READ:CURR?'): response = '1.0E-3A'
         elif cmd.startswith(':MEAS:CURR?'): response = '1.2E-9A'
         elif cmd == ':READ:RAMP:VOLT?': response = '20.0%/s'
@@ -259,6 +265,16 @@ class DriverTests(unittest.TestCase):
             m._serial.write=lambda data: 2
             with self.assertRaises(CommunicationError): m.query('*IDN?')
             self.assertTrue(m._broken)
+
+    def test_interrupt_during_exchange_blocks_further_commands(self):
+        with self.module() as m:
+            with patch.object(m._serial, 'read_until', side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    m.read_voltage(0)
+            sent = list(m._serial.sent)
+            with self.assertRaises(CommunicationError):
+                m.disable(0)
+            self.assertEqual(m._serial.sent, sent)
     def test_command_length_and_injection(self):
         with self.module() as m:
             for cmd in ['*IDN?\r\n:VOLT ON','X'*80+'?','*IDN?;*IDN?']:
@@ -346,5 +362,179 @@ class DriverTests(unittest.TestCase):
                     with self.assertRaises(CommunicationError): m.query('*IDN?')
                     self.assertTrue(m._broken)
                     with self.assertRaises(CommunicationError): m.disable(0)
+
+class RegulationTests(unittest.TestCase):
+    def setUp(self):
+        clock = Mock(return_value=0.0)
+
+        def advance(seconds):
+            clock.return_value += seconds
+
+        for name, replacement in [('sleep', advance), ('monotonic', clock)]:
+            timer = patch('lapis_control.devices.bender.iseg_nhs.time.' + name, replacement)
+            timer.start()
+            self.addCleanup(timer.stop)
+
+    def pilot(self, module, **overrides):
+        options = dict(tolerance_v=0.2, max_step_v=1.0, max_offset_v=5.0,
+                       interval_s=5.0, convergence_timeout_s=40.0)
+        return module.regulate_voltage(0, module.sign * 15.0, **(options | overrides))
+
+    def prepared_module(self, polarity='+', limit=100):
+        module = NHSModule('P' if polarity == '+' else 'N', polarity=polarity,
+                           max_voltage=limit, serial_factory=FakeSerial).connect()
+        self.addCleanup(module.close)
+        module.set_voltage(0, module.sign * 15.0)
+        module.enable(0)
+        module._serial.sent.clear()
+        return module
+
+    def test_offset_convergence_and_later_drift_on_both_polarities(self):
+        for polarity in '+-':
+            with self.subTest(polarity=polarity):
+                module = self.prepared_module(polarity)
+                device = module._serial
+                device.measurement_offset = -3.0
+                loop = self.pilot(module)
+                first = next(loop)
+                self.assertEqual(first.voltage, module.sign * 12.0)
+                self.assertEqual(first.requested_voltage, module.sign * 16.0)
+                for _ in range(5):
+                    sample = next(loop)
+                self.assertLessEqual(abs(module.sign * 15.0 - sample.voltage), 0.2)
+                self.assertIsNone(sample.requested_voltage)
+                device.measurement_offset = -1.0
+                drift = next(loop)
+                self.assertLess(abs(drift.requested_voltage), abs(drift.voltage_set))
+                writes = [cmd for cmd in device.sent if ';' in cmd]
+                self.assertTrue(all(cmd.startswith(':VOLT ') and cmd.endswith(',(@0);*OPC?')
+                                    and 'ON' not in cmd and 'OFF' not in cmd for cmd in writes))
+
+    def test_ramping_waits_and_times_out_without_writing(self):
+        module = self.prepared_module()
+        module._serial.extra_status = ChannelStatus.RAMPING
+        loop = self.pilot(module, convergence_timeout_s=10)
+        self.assertIsNone(next(loop).requested_voltage)
+        with self.assertRaisesRegex(VerificationError, 'did not settle'):
+            next(loop)
+        self.assertFalse(any(';' in cmd for cmd in module._serial.sent))
+
+    def test_decimal_band_edges_count_as_in_tolerance_without_a_write(self):
+        for polarity in '+-':
+            module = self.prepared_module(polarity)
+            module.set_voltage(0, module.sign * 5.0)
+            loop = module.regulate_voltage(0, module.sign * 5.0, tolerance_v=0.2,
+                                           max_step_v=1.0, max_offset_v=5, interval_s=None)
+            module._serial.sent.clear()
+            for offset in (-0.2, 0.2):
+                with self.subTest(polarity=polarity, offset=offset):
+                    module._serial.measurement_offset = offset
+                    self.assertTrue(next(loop).in_tolerance)
+            self.assertFalse(any(';' in cmd for cmd in module._serial.sent))
+            module._serial.measurement_offset = 0.21
+            self.assertFalse(next(loop).in_tolerance)
+
+    def test_measured_excursion_from_p0_trial_stops_before_second_correction(self):
+        for polarity in '+-':
+            with self.subTest(polarity=polarity):
+                module = self.prepared_module(polarity)
+                device = module._serial
+                device.measurement_offset = -1.21
+                loop = self.pilot(module)
+                first = next(loop)
+                self.assertAlmostEqual(abs(first.voltage), 13.79)
+                self.assertAlmostEqual(abs(first.requested_voltage), 15.605)
+                device.volts[0] = 15.60
+                device.measurement_offset = 14.43
+                with self.assertRaisesRegex(VerificationError, r'30\.03 V exceeds 20 V'):
+                    next(loop)
+                self.assertEqual(sum(';' in cmd for cmd in device.sent), 1)
+
+    def test_limit_ends_regulation_instead_of_repeating_command(self):
+        for polarity in '+-':
+            for limit, expected in [(100, 20), (16, 16)]:
+                with self.subTest(polarity=polarity, limit=limit):
+                    module = self.prepared_module(polarity, limit)
+                    module._serial.measurement_offset = -10.0
+                    loop = self.pilot(module)
+                    with self.assertRaisesRegex(VerificationError, 'trim limit'):
+                        list(loop)
+                    self.assertEqual(module.read_voltage_set(0), module.sign * expected)
+                    self.assertEqual(sum(';' in cmd for cmd in module._serial.sent), expected - 15)
+
+    def test_p0_range_with_recorded_readback_and_both_upper_limits(self):
+        for polarity in '+-':
+            for application_limit in (60, 120):
+                with self.subTest(polarity=polarity, application_limit=application_limit):
+                    module = self.prepared_module(polarity, application_limit)
+                    device = module._serial
+                    options = dict(max_offset_v=None, setpoint_range_v=(10, 100))
+                    device.volts[0] = 15.60
+                    device.measurement_offset = 14.43
+                    loop = self.pilot(module, **options)
+                    self.assertAlmostEqual(next(loop).requested_voltage, module.sign * 14.60)
+                    with self.assertRaisesRegex(VerificationError, 'trim limit'):
+                        list(loop)
+                    self.assertEqual(device.volts[0], 10)
+
+                    upper = min(100, application_limit)
+                    device.volts[0] = upper - 0.5
+                    device.measurement_offset = 13.0 - device.volts[0]
+                    loop = self.pilot(module, **options)
+                    self.assertEqual(next(loop).requested_voltage, module.sign * upper)
+                    device.measurement_offset = 0.01
+                    writes = sum(';' in cmd for cmd in device.sent)
+                    with self.assertRaisesRegex(VerificationError, f'exceeds {upper} V'):
+                        next(loop)
+                    self.assertEqual(sum(';' in cmd for cmd in device.sent), writes)
+
+    def test_off_fault_and_current_regulation_never_correct(self):
+        module = self.prepared_module()
+        device = module._serial
+        device.measurement_offset = -3
+        for on, status, mod_error in [(False, 0, False), (True, ChannelStatus.CURRENT_TRIP, False),
+                                      (True, ChannelStatus.CONSTANT_CURRENT, False), (True, 0, True)]:
+            with self.subTest(on=on, status=status, module_error=mod_error):
+                device.on[0], device.extra_status, device.mod_error = on, status, mod_error
+                with self.assertRaises(DeviceError):
+                    next(self.pilot(module))
+                self.assertFalse(any(';' in cmd for cmd in device.sent))
+
+    def test_external_setpoint_change_stops_loop(self):
+        module = self.prepared_module()
+        loop = self.pilot(module)
+        self.assertIsNone(next(loop).requested_voltage)
+        module._serial.volts[0] = 16
+        with self.assertRaisesRegex(VerificationError, 'changed during regulation'):
+            next(loop)
+        module._serial.volts[0] = 5
+        with self.assertRaisesRegex(VerificationError, 'outside trim limits'):
+            next(self.pilot(module))
+        self.assertFalse(any(';' in cmd for cmd in module._serial.sent))
+
+    def test_invalid_parameters_and_ambiguous_write_stop_loop(self):
+        module = self.prepared_module()
+        device = module._serial
+        for options in [dict(tolerance_v=0), dict(max_step_v=float('nan')), dict(max_offset_v=-1),
+                        dict(interval_s=0), dict(convergence_timeout_s=5), dict(max_offset_v=None),
+                        dict(setpoint_range_v=(10, 100)), dict(max_offset_v=None, setpoint_range_v=(16, 100))]:
+            with self.assertRaises(ValueError):
+                next(self.pilot(module, **options))
+        device.measurement_offset = -3
+        write = device.write
+
+        def lose_ack(data):
+            result = write(data)
+            if data.startswith(b':VOLT '):
+                device.buffer = b''
+            return result
+
+        device.write = lose_ack
+        loop = self.pilot(module)
+        with self.assertRaises(CommunicationError):
+            next(loop)
+        self.assertEqual(list(loop), [])
+        self.assertEqual(sum(';' in cmd for cmd in device.sent), 1)
+
 
 if __name__ == '__main__': unittest.main()

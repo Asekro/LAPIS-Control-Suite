@@ -25,8 +25,8 @@ bestimmten Arbeitsplatzpfad.
 
 - **devices:** Verbindungen, Protokoll, gerätespezifische Grenzwerte und Operationen.
   Keine Qt-Abhängigkeit und kein automatisches Verbinden beim Import.
-- **workflows:** künftige Abläufe über mehrere Geräte, einschließlich Reihenfolge,
-  Warten, Abbruch und definierten Ausgangszuständen.
+- **workflows:** Abläufe über mehrere Geräte. Die Vierkanalregelung am Bender
+  koordiniert Einschalten, Einschwingen, Halten und Abfahren der beiden NHS-Module.
 - **gui:** Darstellung und Benutzereingaben; blockierende Geräteoperationen laufen
   später in Workern. Die GUI implementiert keine SCPI-Kommandos.
 - **config:** Zentrale Kommunikationsparameter und lokale Aufbaudaten.
@@ -36,7 +36,7 @@ bestimmten Arbeitsplatzpfad.
   Anleitungen bleiben direkt bei den Geräten.
 - **tests im Geräteordner:** Regressionen und explizite Hardware-Diagnoseskripte.
   **tests im Repository-Root:** Integrationstests des Konfigurationsladers und
-  künftig weiterer Komponenten.
+  der Vierkanalregelung am Bender.
 
 `base_device.py` speichert lediglich einen Namen. Es schreibt keinen Lebenszyklus
 vor und verpflichtet bestehende Treiber nicht zur Vererbung. Der bestehende

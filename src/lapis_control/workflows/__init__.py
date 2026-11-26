@@ -1,1 +1,1 @@
-"""Reserved for measurement workflows coordinating multiple device drivers."""
+"""Measurement workflows coordinating device drivers."""

@@ -7,6 +7,7 @@ magnitudes. NHS firmware 2.20 polarity is checked through signed VNOM because
 the observed devices do not populate channel status bit 0; other versions use it.
 """
 from __future__ import annotations
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import IntFlag
 import logging
@@ -113,6 +114,22 @@ class ModuleReading:
     events: ModuleEvent
     voltage_ramp_percent_s: float
     timestamp: float
+
+@dataclass(frozen=True)
+class VoltageSample:
+    """Feedback before adjustment, and the signed command issued, if any."""
+    timestamp: float
+    voltage_set: float
+    voltage: float
+    status: ChannelStatus
+    requested_voltage: float | None
+    observing: bool = False
+
+    @property
+    def in_tolerance(self) -> bool:
+        """A settled, in-band reading eligible for the hold counter."""
+        return (not self.observing and not (self.status & ChannelStatus.RAMPING)
+                and self.requested_voltage is None)
 
 _NUMBER = re.compile(r'([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?)(.*)')
 def parse_number(text: str, unit: str = '') -> float:
@@ -261,6 +278,10 @@ class NHSModule:
                 if len(command) > 1 and answer.endswith(command[1:]):
                     raise ProtocolError(f'Corrupted command echo: {answer!r}; expected {command!r}')
                 return answer.strip()
+        except KeyboardInterrupt:
+            # An interrupted exchange can leave a partial command or an unread reply.
+            self._broken = True
+            raise
         except (OSError, serial.SerialException, UnicodeError, CommunicationError) as exc:
             self._broken = True
             raise CommunicationError(f'{self.port}: {exc}') from exc
@@ -348,6 +369,119 @@ class NHSModule:
 
     def read_voltage(self, channel):
         return self.sign * abs(self._number(f':MEAS:VOLT? {self._channel(channel)}', 'V'))
+
+    def check_regulation_module_status(self) -> None:
+        """Check supply, temperature, safety loop and module faults before regulation."""
+        module = self.read_module_status()
+        required = (ModuleStatus.MODULE_GOOD | ModuleStatus.SUPPLY_GOOD |
+                    ModuleStatus.TEMPERATURE_GOOD | ModuleStatus.SAFETY_LOOP_GOOD)
+        if module & required != required or module & (ModuleStatus.INPUT_ERROR | ModuleStatus.SERVICE):
+            raise DeviceError(f'{self.port}: cannot regulate with module status {module!r}')
+
+    def _regulation_status(self, channel: int) -> ChannelStatus:
+        self.check_regulation_module_status()
+        status = self.read_status(channel)
+        faults = (ChannelStatus.ARC | ChannelStatus.INPUT_ERROR | ChannelStatus.EMERGENCY_OFF |
+                  ChannelStatus.ARC_NUMBER_EXCEEDED | ChannelStatus.CURRENT_BOUNDS |
+                  ChannelStatus.VOLTAGE_BOUNDS | ChannelStatus.EXTERNAL_INHIBIT |
+                  ChannelStatus.CURRENT_TRIP | ChannelStatus.CURRENT_LIMIT | ChannelStatus.VOLTAGE_LIMIT)
+        if not status & ChannelStatus.ON or status & faults:
+            raise DeviceError(f'{self.port} channel {channel}: cannot regulate with status {status!r}')
+        if not status & ChannelStatus.RAMPING and (
+                status & ChannelStatus.CONSTANT_CURRENT or not status & ChannelStatus.CONSTANT_VOLTAGE):
+            raise DeviceError(f'{self.port} channel {channel}: voltage control inactive ({status!r})')
+        return status
+
+    def regulate_voltage(self, channel: int, target_v: float, *, tolerance_v: float,
+                         max_step_v: float, interval_s: float | None, max_offset_v: float | None = None,
+                         setpoint_range_v: tuple[float, float] | None = None,
+                         measured_limit_v: float | None = None, observe_until: float | None = None,
+                         convergence_timeout_s: float = 40.0) -> Iterator[VoltageSample]:
+        """Continuously trim one enabled channel against its internal voltage readback.
+
+        Specify either a symmetric max_offset_v around the target or an inclusive
+        setpoint_range_v of (minimum magnitude, maximum magnitude) in volts.
+        The application limit applies to both. Each iteration waits for the sample
+        interval, including the first. With interval_s=None the caller schedules
+        each sample and must allow settling time between calls. By default the upper
+        trim limit is also the measured-voltage cutoff. measured_limit_v can specify
+        a separate cutoff, capped at the application limit. With observe_until,
+        expect VSET to start at target and only monitor until that monotonic deadline.
+        The caller owns HV switching and loop lifetime.
+        Breaking iteration leaves the last confirmed setpoint in place.
+        """
+        tolerance = finite(tolerance_v, 'tolerance_v')
+        step = finite(max_step_v, 'max_step_v')
+        interval = None if interval_s is None else finite(interval_s, 'interval_s')
+        timeout = finite(convergence_timeout_s, 'convergence_timeout_s')
+        if min(tolerance, step, timeout) <= 0 or (interval is not None and not 0 < interval < timeout):
+            raise ValueError('Tolerance, limits and interval must be positive; timeout must exceed interval')
+        if (max_offset_v is None) == (setpoint_range_v is None):
+            raise ValueError('Specify exactly one of max_offset_v and setpoint_range_v')
+        target = self.validate_voltage(channel, target_v)
+        # SCPI voltages are decimal. Allow for roundoff at an inclusive band edge.
+        tolerance_with_roundoff = tolerance + max(math.ulp(target), math.ulp(tolerance))
+        if setpoint_range_v is None:
+            offset = finite(max_offset_v, 'max_offset_v')
+            if offset <= 0:
+                raise ValueError('max_offset_v must be positive')
+            lower, upper = max(0.0, abs(target) - offset), abs(target) + offset
+        else:
+            lower, upper = setpoint_range_v
+            lower = finite(lower, 'minimum setpoint magnitude')
+            upper = finite(upper, 'maximum setpoint magnitude')
+            if not 0 <= lower <= abs(target) <= upper:
+                raise ValueError('Setpoint range must be non-negative and contain the target magnitude')
+        upper = min(self.max_voltage, upper)
+        measured_limit = upper
+        if measured_limit_v is not None:
+            measured_limit = min(self.max_voltage, finite(measured_limit_v, 'measured_limit_v'))
+            if measured_limit < upper or measured_limit <= 0:
+                raise ValueError('Measured-voltage limit must be positive and cover the setpoint range')
+        if observe_until is not None:
+            observe_until = finite(observe_until, 'observe_until')
+        expected_set = target if observe_until is not None else None
+        unsettled_since = time.monotonic()
+        while True:
+            if interval is not None:
+                time.sleep(interval)
+            with self._lock:
+                observing = observe_until is not None and time.monotonic() < observe_until
+                setpoint = self.read_voltage_set(channel)
+                measured = self.read_voltage(channel)
+                stamp = time.time()
+                if abs(measured) > measured_limit:
+                    raise VerificationError(f'Channel {channel}: measured {measured:g} V exceeds '
+                                            f'{measured_limit:g} V magnitude limit (setpoint {setpoint:g} V)')
+                status = self._regulation_status(channel)
+                if not lower <= abs(setpoint) <= upper:
+                    raise VerificationError(f'Starting/current setpoint {setpoint:g} V outside trim limits')
+                if expected_set is not None and not math.isclose(setpoint, expected_set, abs_tol=0.01, rel_tol=1e-6):
+                    raise VerificationError(f'Setpoint changed during regulation to {setpoint:g} V')
+                error = target - measured
+                now = time.monotonic()
+                if unsettled_since is None:
+                    unsettled_since = now
+                requested = None
+                if observing:
+                    unsettled_since = None
+                elif not status & ChannelStatus.RAMPING and abs(error) <= tolerance_with_roundoff:
+                    # With external scheduling, slow hold polls can be far apart.
+                    # Start a new settling window when drift is first observed.
+                    unsettled_since = None if interval is None else now
+                elif now - unsettled_since >= timeout:
+                    raise VerificationError(f'Channel {channel} did not settle at {target:g} V within {timeout:g} s')
+                elif not status & ChannelStatus.RAMPING:
+                    delta = max(-step, min(step, 0.5 * error))
+                    magnitude = self.sign * (setpoint + delta)
+                    requested = self.sign * max(lower, min(upper, magnitude))
+                    if math.isclose(requested, setpoint, abs_tol=1e-9):
+                        raise VerificationError(f'Channel {channel} reached trim limit at {setpoint:g} V '
+                                                f'(allowed magnitude {lower:g}..{upper:g} V, '
+                                                f'measured {measured:g} V, target {target:g} V)')
+                    self.set_voltage(channel, requested)
+                expected_set = setpoint if requested is None else requested
+            yield VoltageSample(stamp, setpoint, measured, status, requested, observing)
 
     def read_current(self, channel):
         """Measured amperes exactly as reported (no synthetic polarity sign)."""

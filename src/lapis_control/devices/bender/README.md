@@ -6,6 +6,9 @@ zehn Messzyklen, Sollwertsetzen auf ±10 V sowie Ein- und Ausschalten wurden mit
 den angeschlossenen N06C2-Modulen mit Firmwareversion 2.20 im Notebook geprüft.
 Das ist ein Funktionstest, keine vollständige Prüfung aller Funktionen oder
 der Spannungsgenauigkeit über den gesamten Arbeitsbereich.
+Die Versuche vom 26.11.2026 zur Regelung von p0, zum Halten aller vier
+Elektroden und zum Festwertvergleich auf n0 sind in den Notebook-Abschnitten
+6a bis 6c protokolliert.
 
 ## Installation und erster Test
 
@@ -19,7 +22,7 @@ Für manuelle Hardwaretests `test_bender.ipynb` mit einem Python-Jupyter-Kernel
 öffnen. Nach Treiberänderungen den Kernel neu starten. Die Konfigurationszelle
 und Punkte 1–4 ausführen; 1a/1b und 2a sind optionale Diagnoseabschnitte.
 Schreib- und Einschaltfreigaben sind standardmäßig `False`. Sie für die
-optionalen Punkte 5/6 ausdrücklich aktivieren. Der Treiber benötigt nur pyserial;
+gewünschten Abschnitte 5 bis 6c ausdrücklich aktivieren. Der Treiber benötigt nur pyserial;
 zum Ausführen des Notebooks zusätzlich eine Jupyter-Umgebung mit IPython.
 
 Aktuelle Zuordnung am Testaufbau:
@@ -89,18 +92,145 @@ Gerätevorzeichen unverändert. Die Messspannungen werden mit `sign * abs(raw)`
 auf die geprüfte Modulpolarität normiert. Bei Messwerten nahe null bleibt
 das rohe Vorzeichen daher nicht erhalten; die Diagnosezelle 2a zeigt Rohantworten.
 
-Beim ±10-V-Test wurden am positiven Modul etwa 8,7 V und am negativen Modul
-etwa −10,05 V gemeldet. Laut Einschätzung des Anwenders könnte dies mit dem
-unteren zuverlässigen Arbeitsbereich ab etwa 40 V zusammenhängen. Die Ursache
-und die erreichbare Genauigkeit darunter sind noch nicht quantifiziert.
-Da kleinere Spannungen benötigt werden, führt der Treiber keine 40-V-Untergrenze
-ein und verändert die angeforderten Sollwerte nicht durch eine Kompensation.
+### Nachregelung für eine Elektrode
+
+Beim früheren ±10-V-Test meldete p0 bei 10,00 V Sollwert 8,72 V und n0 bei
+−10,00 V Sollwert −10,05 V. Das NHS liefert mit `:READ:VOLT?` den programmierten
+Sollwert (VSET) und mit `:MEAS:VOLT?` die interne Spannungsmessung (VMEAS).
+iseg spezifiziert deren Genauigkeit für Ausgangsbeträge **über 1 % der
+Nennspannung** bis unterhalb der Nennspannung. Bei den 4-kV-Modulen sind 15 V
+nur 0,375 %. Für die absolute Genauigkeit bei 15 V gibt dieses Datenblatt
+keine Fehlergrenze an. [NHS-Handbuch, Kap. 4, S. 11](https://iseg-hv.com/files/media/docitems_file_20221221154739.pdf#page=11)
+
+Am Display zeigt **VI-MEAS** die intern gemessene Spannung und den gemessenen
+Strom des Kanals. **V-MS** zeigt dieselbe Messspannung zusammen mit dem
+programmierten Spannungssollwert. [NHS-Handbuch, Abschn. 5.2.1, S. 15](https://iseg-hv.com/files/media/docitems_file_20221221154739.pdf#page=15)
+
+Notebook-Abschnitt **6a** enthält den vollständigen Versuch für p0. Nach der
+Konfigurationszelle genügt dieser Abschnitt. Die separate Freigabe
+`ALLOW_P0_TEST` steht standardmäßig auf `False`. Für den Einkanalversuch
+bleiben `ALLOW_WRITES` und `ALLOW_HV_ON` auf `False`.
+
+`module.regulate_voltage(...)` liefert pro Abfrage einen Zeitstempel, VSET,
+VMEAS, den Kanalstatus und einen gegebenenfalls neu angeforderten Sollwert.
+Erst die Iteration startet die Rückkopplung auf einem bereits eingeschalteten
+Kanal. Nach Erreichen des Toleranzbands läuft die Messung weiter und korrigiert
+spätere Drift. Der Aufrufer bestimmt Laufzeit und Abschaltung. Beispiel für
+den bereits eingeschalteten p0 mit einem anfänglichen Sollwert von +15 V:
+
+```python
+feedback = module.regulate_voltage(0, 15.0, tolerance_v=0.2, max_step_v=1.0,
+                                   setpoint_range_v=(10.0, 100.0), interval_s=5.0)
+try:
+    for sample in feedback:
+        print(sample.voltage_set, sample.voltage, sample.requested_voltage)
+finally:
+    module.disable(0)
+```
+
+Zwischen zwei Abfragen und vor der ersten wartet der Regler hier fünf Sekunden.
+Bei laufender Rampe und innerhalb des Toleranzbands schreibt er keinen Sollwert.
+Sonst korrigiert er um die halbe vorzeichenbehaftete Abweichung, begrenzt auf
+1 V je Schritt. Im Beispiel liegen alle Stellwerte zwischen 10 und 100 V.
+Ein kleineres konfiguriertes Anwendungslimit hat Vorrang. Ein
+interner Messwert mit einem Betrag über der wirksamen Obergrenze
+bricht die Iteration bei der nächsten Abfrage vor einem weiteren Stellbefehl ab.
+Polarität, Anwendungs- und Nennspannungslimit prüft der Treiber weiterhin.
+Bei ausgeschaltetem Kanal, Gerätefehler, Stromregelung nach Rampenende,
+fremder Sollwertänderung oder ausgeschöpftem Stellbereich bricht die Iteration
+mit einer Exception ab. Dasselbe gilt bei ausbleibendem Einregeln (standardmäßig
+40 s). Das Beenden der Iteration lässt den letzten Sollwert am Kanal stehen.
+Abschnitt 6a übernimmt das Abfahren und prüft den Aus-Zustand.
+
+Die eingebaute Funktion *Fine Adjustment* gleicht Drift anhand der internen
+Messung modulweit aus. Der Einkanalversuch verwendet ausschließlich den
+Sollwert von p0 als Stellgröße. [iseg SCPI Guide, Abschnitte 1.3.2 und 9.7](https://iseg-hv.com/download/SOFTWARE/isegSCPI/SCPI_Programmers_Guide_en.pdf#page=12)
+
+**Erster Hardwareversuch am 26.11.2026:** Bei 15,00 V Sollwert meldete p0
+zunächst 13,79 V. Nach der ersten Korrektur wurden 15,60 V als Sollwert
+zurückgelesen. Das NHS meldete dazu 30,03 V Messspannung. Auch bei schrittweise
+sinkendem Sollwert blieb die Anzeige erhöht (24,96 V bei 10,60 V Sollwert).
+Der ursprüngliche Regler brach nach Ablauf seines 40-s-Zeitlimits ab. Beim
+Abfahren meldete p0 0,67 V, die spätere Kontrollabfrage ergab Kanal aus,
+10,00 V ursprünglichen Sollwert und 0,05 V interne Messspannung.
+Dieser Lauf hatte eine Stellgrenze von 20 V. Im späteren, in Abschnitt 6a
+gespeicherten Lauf mit 100-V-Grenze lagen die letzten fünf internen Messwerte
+zwischen 15,12 und 15,13 V bei 15,12 V Stellwert (43,4 bis 64,1 s).
+Die Ursache des Sprungs im ersten Lauf und die Spannung an der Elektrode sind offen.
+
+Für die Prüfung an der Elektrode den freigegebenen Messpunkt gegen das
+zugehörige Bezugspotential unter Betriebslast mit einem unabhängigen, für den
+HV-Aufbau geeigneten Messsystem messen. Dessen Auflösung und Messunsicherheit
+bei 15 V müssen zur gewünschten Toleranz passen. VSET, VMEAS und den zeitgleichen
+externen Wert nach dem Einschwingen festhalten. Die Differenz zwischen
+externem Messwert und VMEAS zeigt, welche Abweichung die Software beim Regeln
+auf die interne Anzeige nicht erfassen kann.
+
+### Vier Bender-Elektroden einregeln und halten
+
+Notebook-Abschnitt **6b** startet mit 15 V Zielbetrag und 120 s Laufzeit.
+Nach einem Kernel-Neustart die Konfigurationszelle mit
+`ALLOW_FOUR_CHANNEL_TEST = True` und danach ausschließlich 6b ausführen.
+Die Vorzeichen folgen der Zuordnung p0/p1 positiv und n0/n1 negativ. Der
+Versuch prüft den Aus-Zustand aller vier Kanäle, setzt ihre Sollwerte und
+schaltet sie nacheinander ein. Bei einem anderen Ziel genügt es,
+`TARGET_MAGNITUDE_V` zu ändern. Für den positiven Zielbetrag `M` berechnet
+`hold_bender_voltage` den Bereich der zulässigen Stellbeträge als
+`0 … min(2 × M, Limit)`. Dabei ist `Limit` der kleinste Wert aus dem
+Versuchslimit von 100 V und den konfigurierten `max_voltage`-Werten beider
+Module. Bei 10 V Ziel und 100 V Limit sind 0 bis 20 V erlaubt, bei 15 V Ziel
+0 bis 30 V. Der doppelte Zielbetrag ist die gewählte Stellreserve. Überschreitet
+eine interne Messung das absolute Limit, bricht der Ablauf bei dieser Abfrage ab.
+
+Jeder Kanal hat seinen eigenen nächsten Prüftermin. Nach dem Einschalten
+des letzten Kanals lässt der Ablauf die Module zunächst 20 s bei festem
+Sollwert einschwingen (`INITIAL_SETTLE_S`). In dieser Zeit prüft er
+weiterhin alle 5 s Messwerte, Sollwerte und Gerätestatus. Erst danach darf
+er eine anhaltende Abweichung korrigieren. Drei Messungen in Folge innerhalb
+von ±0,2 V nach Einschwingzeit und Rampenende qualifizieren den Kanal für den 30-s-Haltetakt. Bei
+erkennbarer Drift korrigiert der Regler sofort um die Hälfte der Abweichung
+(höchstens 1 V) und prüft den Kanal anschließend wieder nach 5 s. Eine aktive
+Rampe wird abgewartet. Die Frist von 90 s für andauernde Abweichungen oder Rampen
+beginnt frühestens bei der ersten Regelmessung nach der Einschwingzeit. Die Notebook-Ausgabe zählt Messungen und
+Korrekturen je Kanal und zeigt, ob am Ende alle vier zuletzt stabil waren.
+Im gespeicherten 120-s-Lauf bei ±15 V erreichten alle vier Kanäle den Haltetakt.
+Bei acht internen Messungen pro Kanal war keine Stellkorrektur nötig. Der
+Ablauf bestätigte anschließend für alle vier Kanäle den Aus-Zustand und eine
+interne Restspannung unter 1 V.
+
+Für die spätere Software liegt der Ablauf in
+`lapis_control.workflows.bender_voltage.hold_bender_voltage`. Er wartet
+zwischen den Prüfterminen und führt die seriellen Transaktionen in einem
+Ablauf aus. Bei vier stabilen Kanälen ergeben sich im Mittel rund acht
+Kanalprüfungen pro Minute. Eine solche Prüfung umfasst vier Leseabfragen
+(VSET, VMEAS, Modul- und Kanalstatus). Im Zielband fallen keine Stellbefehle
+an. Eine Drift kurz nach einer Prüfung kann ungefähr 30 s zuzüglich laufender
+Kommunikation unentdeckt bleiben. Die Abstände in der Testzelle lassen sich
+an die beobachtete Drift und die gewünschte Reaktionszeit anpassen.
+
+Der Aufrufer übergibt die geöffnete Verbindung und besitzt während des Tests
+den Schreibzugriff auf die vier Kanäle. `duration_s=None` erlaubt fortlaufenden
+Betrieb. Normales Ende, Abbruch und Ausnahmen lösen das Abfahren aus. Nach
+bestätigtem Aus-Zustand, Rampenende und intern weniger als 1 V stellt der
+Ablauf die vorherigen zulässigen Sollwerte wieder her. Bei einem USB-Ausfall
+kann die Abschaltung betroffener Kanäle unbestätigt bleiben.
+
+**Festwertvergleich auf n0 (Notebook 6c, 26.11.2026, 19:04 Uhr):** Im
+Vierkanalversuch hatte n0 bei −15,00 V Stellwert erst −14,95 V und dann
+−29,98 V gemeldet. Beim anschließenden Einzelversuch wurden bei festem
+−15,00-V-Sollwert 31 interne Messungen über 60 s aufgezeichnet. Die erste
+Messung ergab −15,82 V. Zwischen 30 und 60 s lagen alle 16 Werte bei
+−15,02 bis −14,98 V. Die anschließende Regelung meldete −14,99, −14,99
+und −15,02 V und benötigte keinen Stellschritt. Beim Abschluss meldete n0
+Status `0x0000`, −0,04 V Restspannung und den ursprünglichen Sollwert von
+−10,00 V. Alle Spannungsangaben dieses Versuchs stammen aus der internen NHS-Messung.
 
 ## Funktionen
 
 | Methode am NHSModule | Bedeutung |
 |---|---|
 | `set_voltage(ch, volts)` | Sollspannung setzen und Sollwert zurücklesen |
+| `regulate_voltage(ch, target_v, ...)` | Einen aktiven Kanal fortlaufend auf seine intern gemessene Spannung nachregeln (Iterator) |
 | `read_voltage_set(ch)` / `read_voltage(ch)` | Soll-/Istspannung in V |
 | `read_current_set(ch)` / `read_current(ch)` | Strom-Sollwert / Messstrom in A |
 | `set_current_limit(ch, amperes)` | ISET setzen; Regel-/Trip-Verhalten folgt der Gerätekonfiguration |
@@ -162,6 +292,10 @@ if reading.status & ChannelStatus.CURRENT_TRIP:
   Ausgangszustand kann unbekannt sein. Es gibt keinen automatischen Schreib-Retry.
   Verbindung schließen/neu öffnen und Zustand abfragen. Bei verlorener USB-
   Verbindung ist auch ein Abschaltbefehl nicht garantiert ausführbar.
+- Strg+C während einer laufenden seriellen Transaktion sperrt die betroffene
+  Verbindung für weitere Befehle. Nach dem Neuverbinden den Kanalzustand prüfen.
+  Bei einer Unterbrechung zwischen Transaktionen kann der Vierkanalablauf die
+  bestehenden Verbindungen zum Abfahren nutzen.
 - `DeviceError`: Geräteidentität, Polarität oder Eingabefehler. `VerificationError`:
   zurückgelesener Sollwert passt nicht zur Anforderung.
 - `PartialUpdateError`: `.completed` enthält bestätigte Kanäle, `.failed` den
@@ -191,9 +325,13 @@ ist durch einen Lock geschützt. Die NHS-Puffergrenzen werden berücksichtigt.
 python -m unittest discover -s tests -v
 ```
 
-26 Offline-Tests decken Echo an/aus, signed mapping, ungültige Werte,
-Geräteverwechslung, Timeout, beschädigte Antworten, partielle Writes,
-Geräteablehnung, Sollwertabweichung, Teilfehler über beide Module und Aufräumen ab.
+Die Treibertests prüfen unter anderem Echo an/aus,
+Polaritätszuordnung, Geräteverwechslung, beschädigte Antworten und Teilfehler
+über beide Module. Zur Nachregelung prüfen sie auch spätere Drift,
+Stellgrenzen, Messungen auf der Toleranzgrenze, die gemessene Überschreitung
+aus dem p0-Versuch und Abbrüche bei Rampen-Timeout oder Kommunikationsverlust.
+Die Vierkanaltests mit simulierten NHS-Modulen lassen sich im Repository-Root
+mit `python -m unittest tests.test_bender_voltage -v` ausführen.
 Diese Tests bestätigen Softwareverhalten anhand eines simulierten Protokolls.
 Sie ersetzen nicht den Verbindungstest und einen kontrollierten Schreibtest an
 den tatsächlichen Modulen mit ihrer Firmware.
@@ -223,8 +361,8 @@ ein einzelner blockierender Leseaufruf kann noch bis zu seinem festen Timeout wa
 Der unabhängige Windows/.NET-Lesetest bestand 30 Abfragen pro Modul ohne Fehler.
 Nach der Korrektur bestand auch der NHS-Treiber zehn vollständige Lesezyklen mit
 beiden Modulstatusabfragen und allen vier Bender-Kanälen im Blockmodus, ohne
-zusätzliche Pausen, Wiederholungen oder geänderte Echo-Einstellungen. Alle 26
-Offline-Tests bestehen, einschließlich einer Regression gegen Timeout-Zuweisungen
+zusätzliche Pausen, Wiederholungen oder geänderte Echo-Einstellungen. Die damals 26
+Offline-Tests bestanden, einschließlich einer Regression gegen Timeout-Zuweisungen
 auf einem bereits geöffneten Port. Sollwerte und Ausgänge blieben unverändert.
 
 Das Notebook enthält den Windows-Vergleich unter Punkt 1b; dafür ist kein Download
@@ -253,7 +391,7 @@ Lösung für den damaligen Timeout-/Rekonfigurationsfehler und ist für den
 aktuellen Aufbau nicht erforderlich.
 
 Nach Änderungen an `iseg_nhs.py` den Notebook-Kernel neu starten, damit der
-aktualisierte Treiber geladen wird. Die 26 Offline-Tests prüfen unter anderem
+aktualisierte Treiber geladen wird. Die Treibertests prüfen unter anderem
 die vorzeichenbehaftete Nennspannung und den zeichenweisen Echo-Handshake.
 
 Der abschließende Notebook-Lauf am Hub bestand fünf kurze Kommunikationsrunden
@@ -269,7 +407,7 @@ den Lesetests nicht gelöscht, Ausgänge und Sollwerte nicht verändert.
 
 ## Dokumentationsgrundlage
 
-- NHS Hardwaremanual, 20.12.2022, insbesondere Abschnitt 5.4/5.5:
-  https://iseg-hv.com/download/SYSTEM/NHS/iseg_manual_NHS_en.pdf
+- NHS Hardwaremanual, 20.12.2022, insbesondere Kapitel 4 und Abschnitt 5.4/5.5:
+  https://iseg-hv.com/files/media/docitems_file_20221221154739.pdf
 - SCPI Programmers Guide, Stand 23.10.2026; Kapitel 2–4, 6 und 9:
   https://iseg-hv.com/download/SOFTWARE/isegSCPI/SCPI_Programmers_Guide_en.pdf

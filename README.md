@@ -30,11 +30,12 @@ LAPIS-Control-Suite/
 │   │   ├── oscilloscope/         Treiber, Notebook, Dokumentation und tests/
 │   │   └── vacuum/               Edwards TIC, Notebook, Dokumentation und tests/
 │   ├── gui/                     Bereich für die spätere PySide6-Oberfläche
-│   └── workflows/               Bereich für geräteübergreifende Messabläufe
-└── tests/                       Projektweite Tests der Gerätekonfiguration
+│   └── workflows/               Messabläufe wie die Vierkanalregelung am Bender
+└── tests/                       Tests der Gerätekonfiguration und Bender-Regelung
 ```
 
-Die GUI und geräteübergreifenden Abläufe sind noch nicht implementiert.
+Der erste Messablauf hält einen gemeinsamen Spannungsbetrag auf vier
+Bender-Elektroden. Die GUI ist geplant.
 Die Geräteordner enthalten weiterhin ihre Test-Notebooks. Die
 [Strukturbeschreibung](docs/development/project-layout.md) erläutert Zuständigkeiten
 und die Zuordnung der früheren Pfade unter `Treiber/`.

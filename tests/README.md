@@ -1,9 +1,9 @@
 # Projektweite Tests
 
-Dieser Bereich enthält Integrationstests des Konfigurationsladers und ist für
-spätere Tests von GUI und geräteübergreifenden Messabläufen vorgesehen.
 `test_configuration.py` prüft Dateivalidierung, Parameterübergabe und das Erzeugen
 von Geräteobjekten ohne Hardwarezugriff.
+`test_bender_voltage.py` prüft die Vierkanalregelung mit zwei simulierten
+NHS-Modulen und einer simulierten Uhr, vom Einschwingen bis zum Abfahren.
 
 Die bestehenden Geräte-Regressionstests bleiben unter
 `src/lapis_control/devices/<device>/tests/`, damit Treiber, Notebook und Tests
