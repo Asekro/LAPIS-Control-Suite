@@ -1,8 +1,11 @@
 # LAPIS Control Suite
 
 Python-Projekt zur Geräteansteuerung und späteren Automatisierung des LAPIS-Aufbaus.
-Aktuell vorhanden sind Treiber für den iseg-NHS-Bender, den Coherent Flare NX und
-das Keysight DSOX1204G. Bender und Oszilloskop wurden am Gerät getestet; der
+Aktuell vorhanden sind Treiber für den iseg-NHS-Bender, den Coherent Flare NX,
+das Keysight DSOX1204G und den Edwards TIC mit nEXT 300 und nXDS.
+Der TIC-Treiber liest den Druck und die Pumpendiagnose aus. Das Vakuum-Notebook
+enthält die am Aufbau über COM13 erfassten Messwerte.
+Bender und Oszilloskop wurden am Gerät getestet; der
 Laser-Treiber ist noch nicht vollständig am Gerät validiert.
 
 Die fünf [Architekturentscheidungen](docs/architecture/README.md) aus
@@ -24,10 +27,11 @@ LAPIS-Control-Suite/
 │   │   ├── base_device.py        Optionale minimale Basis, keine Pflichtvererbung
 │   │   ├── bender/               Treiber, Notebook, Dokumentation und tests/
 │   │   ├── laser/                Treiber, Notebook, Dokumentation und tests/
-│   │   └── oscilloscope/         Treiber, Notebook, Dokumentation und tests/
+│   │   ├── oscilloscope/         Treiber, Notebook, Dokumentation und tests/
+│   │   └── vacuum/               Edwards TIC, Notebook, Dokumentation und tests/
 │   ├── gui/                     Bereich für die spätere PySide6-Oberfläche
 │   └── workflows/               Bereich für geräteübergreifende Messabläufe
-└── tests/                       Platz für spätere Integrationstests
+└── tests/                       Projektweite Tests der Gerätekonfiguration
 ```
 
 Die GUI und geräteübergreifenden Abläufe sind noch nicht implementiert.
@@ -57,6 +61,7 @@ Python-Paketinstallation erforderlich. Details: [Einrichtung](docs/development/s
 | Bender / iseg NHS | [README](src/lapis_control/devices/bender/README.md) | [test_bender.ipynb](src/lapis_control/devices/bender/test_bender.ipynb) |
 | Keysight DSOX1204G | [README](src/lapis_control/devices/oscilloscope/README.md) | [test_oscilloscope.ipynb](src/lapis_control/devices/oscilloscope/test_oscilloscope.ipynb) |
 | Coherent Flare NX | [README](src/lapis_control/devices/laser/README.md) | [test_laser.ipynb](src/lapis_control/devices/laser/test_laser.ipynb) |
+| Edwards TIC / nEXT 300 / nXDS | [README](src/lapis_control/devices/vacuum/README.md) | [test_vacuum.ipynb](src/lapis_control/devices/vacuum/test_vacuum.ipynb) |
 
 Alle vorhandenen Offline-Regressionstests gemeinsam, ohne Gerätezugriff:
 
@@ -99,8 +104,8 @@ Kompatibilitätsaliase stehen in [ADR-007](docs/architecture/ADR-007-driver-life
 [config/devices.example.json](config/devices.example.json) enthält Aufbaudaten und
 Kommunikationsparameter. Eine lokale Kopie `config/devices.local.json` wird von Git
 ignoriert. `lapis_control.configuration.load_devices(path)` prüft die gewählte
-Datei und erzeugt unverbundene Geräteobjekte. Feste Protokollwerte werden gegen
-die unterstützten Treiberprofile geprüft; Ports und Timeouts werden übernommen.
+Datei und erzeugt unverbundene Geräteobjekte. Die JSON enthält ausschließlich
+einstellbare Werte. Das feste Kommunikationsprotokoll legt der jeweilige Treiber fest.
 Die Geräte-Notebooks wählen die Datei über `CONFIG_PATH`. Details und ein Beispiel
 stehen in der [Konfigurationsanleitung](config/README.md).
 

@@ -16,6 +16,7 @@ angenommene Entscheidung, nicht die vollständige Umsetzung sämtlicher Funktion
 | [006](ADR-006-project-layout.md) | Paketstruktur und gerätenahe Tests | Lokale Ergänzung für LAPIS |
 | [007](ADR-007-driver-lifecycle-and-protocol-settings.md) | `connect()`/`close()`, feste Protokollwerte | Präzisiert 002; ersetzt die freie Baudratenwahl aus 005 |
 | [008](ADR-008-central-communication-configuration.md) | Zentrale, validierte Kommunikationskonfiguration | Ergänzt 005 und 007; einstellbare Laser-Timeouts |
+| [009](ADR-009-adjustable-configuration.md) | Nur einstellbare Werte in der Konfigurationsvorlage | Ersetzt die Pflicht zu festen Protokollfeldern aus 008 |
 
 Die [Bewertung](review-2026-11-18.md) enthält Anwendungshinweise und offene Punkte
 für dieses Projekt; sie verändert die übernommenen ADR-Texte nicht.

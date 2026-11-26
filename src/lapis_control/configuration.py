@@ -1,8 +1,7 @@
 """Load explicit setup files and build disconnected device instances.
 
-Protocol fields are checked against the drivers' supported profiles. Runtime
-settings are passed to constructors. No fallback file or automatic connection
-is used; malformed or unsupported settings fail before any hardware is opened.
+Only adjustable settings are passed to constructors. Fixed protocol fields in
+older setup files are accepted when they agree with the driver.
 """
 from __future__ import annotations
 
@@ -16,8 +15,9 @@ import serial
 from .devices.bender import iseg_nhs
 from .devices.laser import flare_nx
 from .devices.oscilloscope import keysight_dsox1204g
+from .devices.vacuum import edwards_tic
 
-Device = iseg_nhs.Bender | flare_nx.FlareNx | keysight_dsox1204g.KeysightDSOX1204G
+Device = iseg_nhs.Bender | flare_nx.FlareNx | keysight_dsox1204g.KeysightDSOX1204G | edwards_tic.EdwardsTIC
 
 
 class ConfigurationError(ValueError):
@@ -51,11 +51,15 @@ def _boolean(value: Any, path: str) -> bool:
     return value
 
 
-def _protocol(settings: dict[str, Any], expected: dict[str, Any], path: str) -> None:
-    for key, required in expected.items():
-        value = settings[key]
-        if value != required or isinstance(value, bool) != isinstance(required, bool):
-            raise ConfigurationError(f"{path}.{key}: supported value is {required!r}, received {value!r}.")
+def _communication(value: Any, keys: set[str], path: str, legacy: dict[str, Any]) -> dict[str, Any]:
+    """Validate adjustable settings and any fixed fields retained in older files."""
+    present = legacy.keys() & value.keys() if isinstance(value, dict) else set()
+    settings = _section(value, keys | present, path)
+    for key in present:
+        actual, required = settings[key], legacy[key]
+        if actual != required or isinstance(actual, bool) != isinstance(required, bool):
+            raise ConfigurationError(f"{path}.{key}: supported value is {required!r}, received {actual!r}.")
+    return settings
 
 
 def _serial_profile(baudrate: int, terminator: bytes) -> dict[str, Any]:
@@ -67,6 +71,18 @@ def _serial_profile(baudrate: int, terminator: bytes) -> dict[str, Any]:
     }
 
 
+def _build_vacuum(value: Any) -> edwards_tic.EdwardsTIC:
+    data = _section(value, {'port', 'communication'}, 'vacuum')
+    fixed = _serial_profile(edwards_tic.BAUDRATE, edwards_tic.TERMINATOR)
+    comm = _communication(data['communication'], {'timeout_s', 'write_timeout_s'},
+                          'vacuum.communication', fixed)
+    return edwards_tic.EdwardsTIC(
+        port=_text(data['port'], 'vacuum.port'),
+        timeout=_positive(comm['timeout_s'], 'vacuum.communication.timeout_s'),
+        write_timeout=_positive(comm['write_timeout_s'], 'vacuum.communication.write_timeout_s'),
+    )
+
+
 def _serial_number(value: Any, path: str) -> str | None:
     return None if value is None else _text(value, path)
 
@@ -75,9 +91,8 @@ def _build_bender(value: Any) -> iseg_nhs.Bender:
     data = _section(value, {'positive_port', 'negative_port', 'positive_serial',
                             'negative_serial', 'max_voltage', 'communication'}, 'bender')
     fixed = _serial_profile(iseg_nhs.BAUDRATE, iseg_nhs.TERMINATOR)
-    comm = _section(data['communication'], set(fixed) | {'timeout_s', 'echo_handshake'},
-                    'bender.communication')
-    _protocol(comm, fixed, 'bender.communication')
+    comm = _communication(data['communication'], {'timeout_s', 'echo_handshake'},
+                          'bender.communication', fixed)
     return iseg_nhs.Bender(
         positive_port=_text(data['positive_port'], 'bender.positive_port'),
         negative_port=_text(data['negative_port'], 'bender.negative_port'),
@@ -91,9 +106,8 @@ def _build_bender(value: Any) -> iseg_nhs.Bender:
 
 def _build_scope(value: Any) -> keysight_dsox1204g.KeysightDSOX1204G:
     data = _section(value, {'resource', 'communication'}, 'oscilloscope')
-    comm = _section(data['communication'], {'visa_backend', 'timeout_ms', 'terminator'},
-                    'oscilloscope.communication')
-    _protocol(comm, {'terminator': keysight_dsox1204g.TERMINATOR}, 'oscilloscope.communication')
+    comm = _communication(data['communication'], {'visa_backend', 'timeout_ms'},
+                          'oscilloscope.communication', {'terminator': keysight_dsox1204g.TERMINATOR})
     return keysight_dsox1204g.KeysightDSOX1204G(
         resource=_text(data['resource'], 'oscilloscope.resource'),
         timeout_ms=_positive(comm['timeout_ms'], 'oscilloscope.communication.timeout_ms'),
@@ -105,9 +119,8 @@ def _build_laser(value: Any) -> flare_nx.FlareNx:
     data = _section(value, {'port', 'communication'}, 'laser')
     fixed = _serial_profile(flare_nx.BAUDRATE, flare_nx.CRLF)
     fixed.update(minimum_command_delay_s=flare_nx.MIN_COMMAND_DELAY_S, command_handshake=True)
-    comm = _section(data['communication'], set(fixed) | {'timeout_s', 'write_timeout_s', 'handshake_interface'},
-                    'laser.communication')
-    _protocol(comm, fixed, 'laser.communication')
+    comm = _communication(data['communication'], {'timeout_s', 'write_timeout_s', 'handshake_interface'},
+                          'laser.communication', fixed)
     interface = comm['handshake_interface']
     if interface is not None:
         interface = _text(interface, 'laser.communication.handshake_interface')
@@ -137,7 +150,8 @@ def load_devices(path: str | Path) -> dict[str, Device]:
         data = json.loads(Path(path).read_text(encoding='utf-8-sig'), object_pairs_hook=_unique_keys)
     except (json.JSONDecodeError, UnicodeError) as exc:
         raise ConfigurationError(f"Invalid setup file {path}: {exc}") from exc
-    builders = {'bender': _build_bender, 'oscilloscope': _build_scope, 'laser': _build_laser}
+    builders = {'bender': _build_bender, 'oscilloscope': _build_scope, 'laser': _build_laser,
+                'vacuum': _build_vacuum}
     if not isinstance(data, dict) or not data:
         raise ConfigurationError('Expected a non-empty JSON object containing device sections.')
     unknown = data.keys() - builders.keys()

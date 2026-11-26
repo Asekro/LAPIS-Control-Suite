@@ -1,4 +1,11 @@
 {
+  "vacuum": {
+    "port": "COM13",
+    "communication": {
+      "timeout_s": 1.0,
+      "write_timeout_s": 1.0
+    }
+  },
   "bender": {
     "positive_port": "COM12",
     "negative_port": "COM11",
@@ -6,14 +13,6 @@
     "negative_serial": "8000312",
     "max_voltage": 100.0,
     "communication": {
-      "baudrate": 9600,
-      "bytesize": 8,
-      "parity": "N",
-      "stopbits": 1,
-      "xonxoff": false,
-      "rtscts": false,
-      "dsrdtr": false,
-      "terminator": "\r\n",
       "timeout_s": 2.0,
       "echo_handshake": false
     }
@@ -22,25 +21,14 @@
     "resource": "USB0::0x2A8D::0x0396::CN58467706::INSTR",
     "communication": {
       "visa_backend": "",
-      "timeout_ms": 5000,
-      "terminator": "\n"
+      "timeout_ms": 5000
     }
   },
   "laser": {
     "port": "COM10",
     "communication": {
-      "baudrate": 9600,
-      "bytesize": 8,
-      "parity": "N",
-      "stopbits": 1,
-      "xonxoff": false,
-      "rtscts": false,
-      "dsrdtr": false,
-      "terminator": "\r\n",
       "timeout_s": 1.0,
       "write_timeout_s": 1.0,
-      "minimum_command_delay_s": 0.1,
-      "command_handshake": true,
       "handshake_interface": "USB"
     }
   }

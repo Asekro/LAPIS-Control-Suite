@@ -40,10 +40,11 @@ stehen unter `docs/architecture/`; lokale Ergänzungen präzisieren die unverän
 - COM-Ports, VISA-Adressen, Gerätezuordnung und Anwendungslimits kommen von außen.
   Timeouts sind Wartezeiten und dürfen bei Bedarf konfigurierbar sein. Beim NHS
   während einer Transaktion keine seriellen Portparameter neu setzen.
-- Aufbaudaten und Kommunikationsparameter stehen zentral unter `config/`.
-  `lapis_control.configuration.load_devices()` prüft feste Protokollwerte gegen
-  den Treiber und erzeugt unverbundene Instanzen. Treiber lesen selbst keine Dateien;
-  es gibt keinen stillen Rückfall auf Beispielwerte. Details stehen in ADR-008.
+- Aufbaudaten und einstellbare Kommunikationsparameter stehen zentral unter
+  `config/`. Feste Protokollwerte gehören in den Treiber.
+  `lapis_control.configuration.load_devices()` validiert die gewählte Datei
+  und erzeugt unverbundene Instanzen. Treiber lesen selbst keine Dateien;
+  es gibt keinen stillen Rückfall auf Beispielwerte. Details stehen in ADR-008 und ADR-009.
 - Keine Hardwarebefehle oder Protokollannahmen ohne Grundlage im Manual erfinden.
   Referenzen und beobachtete Firmwareabweichungen nachvollziehbar dokumentieren.
 

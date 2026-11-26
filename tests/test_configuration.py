@@ -32,7 +32,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_example_creates_disconnected_devices(self):
         devices = load_devices(ROOT / 'config/devices.example.json')
-        self.assertEqual(set(devices), {'bender', 'laser', 'oscilloscope'})
+        self.assertEqual(set(devices), {'bender', 'laser', 'oscilloscope', 'vacuum'})
+        self.assertFalse(devices['vacuum'].is_connected)
         self.assertEqual(devices['bender'].positive.port, self.example['bender']['positive_port'])
         self.assertEqual(devices['bender'].positive.expected_serial, self.example['bender']['positive_serial'])
         self.assertEqual(devices['laser'].port, self.example['laser']['port'])
@@ -45,6 +46,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_ports_and_runtime_settings_are_applied(self):
         data = copy.deepcopy(self.example)
+        data['vacuum']['port'] = 'COM85'
+        data['vacuum']['communication'].update(timeout_s=2.25, write_timeout_s=1.75)
         data['bender']['positive_port'] = 'COM90'
         data['bender']['communication']['timeout_s'] = 3.5
         data['bender']['communication']['echo_handshake'] = True
@@ -52,6 +55,9 @@ class ConfigurationTests(unittest.TestCase):
                                                handshake_interface='SERIAL')
         data['oscilloscope']['communication'].update(timeout_ms=1234, visa_backend='@py')
         devices = self.load(data)
+        self.assertEqual(devices['vacuum'].port, 'COM85')
+        self.assertEqual(devices['vacuum'].timeout, 2.25)
+        self.assertEqual(devices['vacuum'].write_timeout, 1.75)
         self.assertEqual(devices['bender'].positive.port, 'COM90')
         self.assertEqual(devices['bender'].negative.timeout, 3.5)
         self.assertTrue(devices['bender'].negative.echo_handshake)
@@ -70,8 +76,29 @@ class ConfigurationTests(unittest.TestCase):
             manager.close.assert_called_once()
             instrument.write.assert_not_called()
 
+    def test_example_omits_fixed_fields_and_older_local_files_still_load(self):
+        serial_profile = dict(baudrate=9600, bytesize=8, parity='N', stopbits=1,
+                              xonxoff=False, rtscts=False, dsrdtr=False)
+        legacy_fields = {
+            'vacuum': dict(serial_profile, terminator='\r'),
+            'bender': dict(serial_profile, terminator='\r\n'),
+            'laser': dict(serial_profile, terminator='\r\n', minimum_command_delay_s=0.1,
+                          command_handshake=True),
+            'oscilloscope': {'terminator': '\n'},
+        }
+        data = copy.deepcopy(self.example)
+        for name, fields in legacy_fields.items():
+            self.assertTrue(fields.keys().isdisjoint(data[name]['communication']))
+            data[name]['communication'].update(fields)
+        data['vacuum']['port'] = 'COM83'
+        self.assertEqual(self.load(data)['vacuum'].port, 'COM83')
+        self.open_serial.assert_not_called()
+        self.open_visa.assert_not_called()
+
     def test_unsupported_protocol_and_invalid_runtime_settings_fail(self):
         cases = [
+            ('vacuum', 'terminator', '\r\n'), ('vacuum', 'write_timeout_s', 0),
+            ('vacuum', 'baudrate', 19200), ('vacuum', 'allow_write', True),
             ('bender', 'baudrate', 115200), ('bender', 'baudrate', '9600'),
             ('bender', 'parity', 'E'), ('bender', 'stopbits', True),
             ('bender', 'rtscts', True), ('bender', 'echo_handshake', 'false'),

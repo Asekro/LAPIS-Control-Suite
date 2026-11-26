@@ -2,7 +2,8 @@
 
 `devices.example.json` hält Anschlussdaten und Kommunikationsparameter zentral
 fest. Eingetragen sind Bender COM12/COM11, der bisher getestete Scope und der
-Flare NX an COM10 mit USB-Handshake. Den tatsächlichen Aufbau vor dem Verbinden prüfen.
+Flare NX an COM10 mit USB-Handshake. Der Edwards TIC ist im aktuellen Aufbau
+an COM13 angeschlossen (Abschnitt `vacuum`).
 
 Für lokale Änderungen die Datei nach `devices.local.json` kopieren. Diese Kopie
 wird von Git ignoriert. Der Dateipfad wird ausdrücklich angegeben; es gibt keinen
@@ -29,22 +30,19 @@ vollständig anzugeben. Nicht benötigte Geräteabschnitte können entfallen.
 | `positive_serial`, `negative_serial` | NHS-Geräte-Seriennummern, keine USB-IDs; `null` deaktiviert die optionale Serienprüfung |
 | `max_voltage` | Anwendungslimit in Volt, keine Nennspannung |
 | `timeout_s` | Serielle Wartezeit in Sekunden; beim NHS für Lesen und Schreiben |
-| `write_timeout_s` | Separater Schreibtimeout des Lasers in Sekunden |
+| `write_timeout_s` | Separater Sendetimeout von Laser und TIC in Sekunden |
 | `timeout_ms` | VISA-Wartezeit in Millisekunden |
 | `visa_backend` | `""` für die vorhandene Standard-VISA-Bibliothek |
 | `handshake_interface` | `null`, `"SERIAL"` oder `"USB"`; bezeichnet die Schnittstelle am Laser |
 | `echo_handshake` | NHS-Byte-Echo-Modus; `false` ist der am Aufbau geprüfte Blockversand |
-| Baudrate, Datenformat, `xonxoff`/`rtscts`/`dsrdtr` | Festes unterstütztes Profil: 9600 Baud, 8N1, Leitungs-Handshake aus |
-| `terminator` | Sende-/Empfangsabschluss: seriell `"\r\n"`, Scope `"\n"` |
-| `minimum_command_delay_s`, `command_handshake` | Festes Laserprofil: mindestens 100 ms Befehlsabstand, Protokoll-Handshake an |
 
-Die festen Profilwerte sind sichtbar, aber keine frei unterstützten Alternativen.
-Zum Beispiel wird `baudrate: 115200` vor dem Verbinden mit einer
-`ConfigurationError` zurückgewiesen. Damit bleibt eine versehentliche Änderung
-erkennbar. Ports, Timeouts und unterstützte Optionen werden an die Treiber übergeben.
-Für eine andere Protokollvariante müssen Manual und Treiber gemeinsam angepasst werden.
+Baudrate, Datenformat, Abschlusszeichen und feste Handshake-Vorgaben legt der
+jeweilige Treiber fest. Ältere lokale Dateien lassen sich weiter laden, wenn
+die dort eingetragenen Protokollwerte zum Treiber passen. Zum Umstellen können
+die gegenüber der neuen Vorlage entfallenen Felder einfach gelöscht werden.
+Bei abweichenden Werten nennt der Lader das betroffene Feld.
 
 Der Lader öffnet weder Ports noch VISA-Verbindungen. Import oder Dateiänderung
 bewirken keine Geräteaktion. Er schaltet auch keine Ausgänge ein. Direkte Nutzung
 der Treiber ohne Konfigurationsdatei bleibt möglich. Siehe
-[ADR-008](../docs/architecture/ADR-008-central-communication-configuration.md).
+[ADR-009](../docs/architecture/ADR-009-adjustable-configuration.md).
