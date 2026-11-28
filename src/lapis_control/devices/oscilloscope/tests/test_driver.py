@@ -276,11 +276,13 @@ class DriverTests(unittest.TestCase):
     def test_timed_window_off_before_error_queue_and_no_repeat(self):
         self.scope.configure_ttl(load='HIGHZ')
         self.scope.arm_single()
+        self.inst.values[':OPERegister:CONDition?'] = '8'
         self.inst.commands.clear()
         self.assertTrue(self.scope.timed_ttl_window(0.2, Event()))
         on = self.inst.commands.index(':WGEN:OUTPut 1')
         self.assertEqual(self.inst.commands[on:on+5], [':WGEN:OUTPut 1', ':WGEN:OUTPut?', ':TER?',
                                                       ':WGEN:OUTPut OFF', ':WGEN:OUTPut?'])
+        self.inst.values[':OPERegister:CONDition?'] = '0'
         self.scope.wait_for_single()
         self.assertEqual(self.inst.timeout, 5000)
         self.assertEqual(self.inst.values[':WGEN:OUTPut?'], '0')
@@ -289,6 +291,7 @@ class DriverTests(unittest.TestCase):
         self.scope.configure_ttl(load='HIGHZ')
         self.inst.events_after_single = deque(['0'])
         self.scope.arm_single()
+        self.inst.values[':OPERegister:CONDition?'] = '8'
         self.inst.commands.clear()
         stop = Event()
         stop.set()
@@ -307,6 +310,7 @@ class DriverTests(unittest.TestCase):
         self.scope.configure_ttl(load='HIGHZ')
         self.inst.events_after_single = deque(['0'])
         self.scope.arm_single()
+        self.inst.values[':OPERegister:CONDition?'] = '8'
         self.assertFalse(self.scope.timed_ttl_window(.025, Event()))
         self.assertEqual(self.inst.values[':WGEN:OUTPut?'], '0')
         self.inst.events_after_single = deque(['1'])
@@ -315,6 +319,25 @@ class DriverTests(unittest.TestCase):
         with self.assertRaisesRegex(ScopeError, 'Premature trigger'):
             self.scope.timed_ttl_window(.1, Event())
         self.assertNotIn(':WGEN:OUTPut 1', self.inst.commands)
+
+    def test_stopped_single_or_early_trigger_blocks_wavegen(self):
+        self.scope.configure_ttl(load='HIGHZ')
+        for status, trigger, reason in (('0', '0', 'stopped before the trigger'),
+                                        ('8', '1', 'Premature trigger')):
+            with self.subTest(status=status, trigger=trigger):
+                self.scope.arm_single()
+                self.scope.wait_until_armed()
+                self.inst.values[':OPERegister:CONDition?'] = status
+                self.inst.values[':TER?'] = trigger
+                with self.assertRaisesRegex(ScopeError, reason):
+                    self.scope.timed_ttl_window(.1, Event())
+                if trigger == '1':
+                    # TER clears on read; the driver must still remember the premature event.
+                    self.inst.values[':TER?'] = '0'
+                    with self.assertRaisesRegex(ScopeError, reason):
+                        self.scope.require_untriggered_single()
+        self.assertNotIn(':WGEN:OUTPut 1', self.inst.commands)
+
     def test_close_off_after_transport_error(self):
         self.scope.configure_ttl(load='HIGHZ'); self.inst.fail_enable=True
         with self.assertRaises(pyvisa.errors.VisaIOError): self.scope.wavegen_output(True)

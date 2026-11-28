@@ -50,6 +50,15 @@ class AcquisitionInstrument(Instrument):
             self.values[key+'?'] = value
         return size
 
+    def query(self, command):
+        answer = super().query(command)
+        if command == ':AER?' and answer == '1':
+            self.values[':AER?'] = '0'
+            # Model a device where Wait Trig clears with AER while Single keeps running.
+            status = int(self.values[':OPERegister:CONDition?'])
+            self.values[':OPERegister:CONDition?'] = str(status & ~32)
+        return answer
+
 
 @unittest.skipUnless(QApplication, 'PySide6 GUI extra is optional')
 class DesktopTests(unittest.TestCase):
@@ -123,12 +132,16 @@ class DesktopTests(unittest.TestCase):
         self.w.scope.channels[1][0].setChecked(True)
         self.w.scope.channels[1][1].setText('Detektor')
         self.w.nav['laser'].click()
-        self.assertFalse(self.w.laser.arm.isEnabled())
-        self.w.laser.load.setCurrentIndex(1)
+        self.assertTrue(self.w.laser.arm.isEnabled())
         self.w.laser.arm.click()
         self.wait_for(self.w.laser.fire.isEnabled)
         self.assertTrue(self.enabled)
         self.assertFalse(self.w.scope.single.isEnabled())
+        for command in (':WGEN:OUTPut:LOAD ONEMeg', ':WGEN:FUNCtion PULSe', ':WGEN:VOLTage 5',
+                        ':WGEN:VOLTage:OFFSet 2.5', ':WGEN:FUNCtion:PULSe:WIDTh 5e-05'):
+            self.assertIn(command, self.inst.commands)
+        self.assertNotIn(':WGEN:OUTPut:LOAD FIFTy', self.inst.commands)
+        self.assertNotIn(':WGEN:OUTPut 1', self.inst.commands)
 
     def test_monitoring_shot_transfer_local_export_and_offline_reopen(self):
         self.assertFalse(self.w.connected)
@@ -175,8 +188,34 @@ class DesktopTests(unittest.TestCase):
                 self.idle()
             self.assertIn('Detektor', path.with_suffix('.csv').read_text(encoding='utf-8'))
 
-    def test_close_while_armed_disarms_and_releases_without_trigger(self):
+    def test_armed_banner_keeps_countdown_during_status_updates(self):
         self.prepare_shot()
+        banner = self.w.shot_message
+        self.assertRegex(banner.text(), r'^Laser scharf · noch \d+ s$')
+        self.w.navigate('overview')
+        with patch('lapis_control.gui.window.time', wraps=time) as clock:
+            for seconds in (12, 11):
+                clock.monotonic.return_value = self.w.arm_deadline - seconds + 0.25
+                expected = f'Laser scharf · noch {seconds} s'
+                self.w.tick()
+                self.assertEqual(banner.text(), expected)
+                self.w.jobs.changed.emit()
+                self.assertEqual(banner.text(), expected)
+                self.assertEqual(self.w.laser.phase.text(), expected)
+        self.w.shot_stop.click()
+        self.w.tick()
+        self.assertIn('Abbruch angefordert', banner.text())
+        self.idle()
+
+    def test_close_while_armed_disarms_and_releases_without_trigger(self):
+        timeout = self.w.laser.arm_timeout
+        self.assertEqual(timeout.value(), 15)
+        timeout.setValue(45)
+        before = time.monotonic()
+        self.prepare_shot()
+        self.assertFalse(timeout.isEnabled())
+        self.assertGreaterEqual(self.w.arm_deadline, before + 45)
+        self.assertLessEqual(self.w.arm_deadline, time.monotonic() + 45)
         self.w.close()
         self.assertTrue(self.w.closing)
         self.w.timer.start(10)
@@ -186,6 +225,123 @@ class DesktopTests(unittest.TestCase):
         self.assertNotIn(':WGEN:OUTPut 1', self.inst.commands)
         self.laser.close.assert_called_once()
         self.assertTrue(self.inst.closed)
+
+    def test_selected_external_arm_timeout_disarms_without_pulse(self):
+        self.connect('laser')
+        page = self.w.laser
+        page.source.setCurrentIndex(1)
+        page.arm_timeout.setValue(1)
+        with self.assertLogs('lapis_control', 'ERROR'):
+            page.arm.click()
+            self.wait_for(lambda: self.w.armed)
+            self.assertTrue(self.enabled)
+            self.assertFalse(page.arm_timeout.isEnabled())
+            self.idle()
+        self.assertIn('Arming window expired', page.phase.text())
+        self.laser.turn_off.assert_called_once_with()
+        self.assertFalse(self.enabled)
+        self.assertEqual(self.inst.counter, 700)
+        self.assertTrue(page.arm_timeout.isEnabled())
+
+    def test_laser_controls_stay_enabled_and_arm_once_after_all_reads(self):
+        bender = Bender('P', 'N', max_voltage=100, serial_factory=TrialSerial)
+        self.w.devices['bender'] = bender
+        self.w.bender_control = BenderControl(bender)
+        for key in ('laser', 'oscilloscope', 'bender'):
+            self.connect(key)
+        self.w.navigate('laser')
+        page = self.w.laser
+        buttons = (page.refresh, page.arm, page.off, page.reset, page.connection)
+        releases = {key: Event() for key in ('laser', 'oscilloscope', 'bender')}
+
+        def delayed(key, read):
+            def wait_and_read():
+                if not releases[key].wait(4):
+                    raise TimeoutError(f'{key} read was not released')
+                return read()
+            return wait_and_read
+
+        scope = self.w.devices['oscilloscope']
+        with (patch.object(self.laser, 'read_head_temperature_c', side_effect=delayed('laser', lambda: 25.1)) as read,
+              patch.object(scope, 'status', side_effect=delayed('oscilloscope', scope.status)),
+              patch.object(bender, 'read_all', side_effect=delayed('bender', bender.read_all))):
+            try:
+                self.w.tick()
+                for key in ('oscilloscope', 'bender'):
+                    self.w.refresh(key, periodic=True)
+                self.assertTrue(all(btn.isEnabled() for btn in buttons))
+                page.refresh.click()
+                page.arm.click()
+                page.arm.click()
+                self.assertFalse(page.arm.isEnabled())
+                self.assertFalse(page.fire.isEnabled())
+                self.assertTrue(page.abort.isEnabled())
+                for key in ('laser', 'oscilloscope'):
+                    releases[key].set()
+                    self.wait_for(lambda: not any(j.name == 'read' and key in j.resources
+                                                  for j in self.w.jobs.active.values()))
+                    self.laser.arm_single_shot.assert_not_called()
+            finally:
+                for release in releases.values():
+                    release.set()
+            self.wait_for(page.fire.isEnabled)
+            self.laser.arm_single_shot.assert_called_once_with()
+            read.assert_called_once_with()
+            page.abort.click()
+            self.idle()
+            self.assertNotIn(':WGEN:OUTPut 1', self.inst.commands)
+
+    def test_laser_off_replaces_queued_action_even_if_status_read_fails(self):
+        self.connect('laser')
+        page = self.w.laser
+        page.source.setCurrentIndex(1)
+        for action in (page.arm, page.reset):
+            release = Event()
+
+            def unreadable():
+                release.wait(4)
+                raise OSError('Laser test read failed')
+
+            self.laser.turn_off.reset_mock()
+            with (patch.object(self.laser, 'read_head_temperature_c', side_effect=unreadable),
+                  self.assertLogs('lapis_control', 'ERROR')):
+                self.w.refresh('laser', periodic=True)
+                try:
+                    action.click()
+                    self.assertFalse(action.isEnabled())
+                    self.assertTrue(page.off.isEnabled())
+                    page.off.click()
+                    self.assertFalse(page.off.isEnabled())
+                    self.laser.turn_off.assert_not_called()
+                finally:
+                    release.set()
+                self.idle()
+                self.laser.turn_off.assert_called_once_with()
+                self.laser.arm_single_shot.assert_not_called()
+                self.laser.reset_interlock_fault.assert_not_called()
+
+    def test_failed_scope_read_drops_pending_arm(self):
+        self.connect('laser')
+        self.assertFalse(self.w.laser.arm.isEnabled())
+        self.connect('oscilloscope')
+        release = Event()
+
+        def failed_read():
+            release.wait(4)
+            raise OSError('Scope test read failed')
+
+        with (patch.object(self.w.devices['oscilloscope'], 'status', side_effect=failed_read),
+              self.assertLogs('lapis_control', 'ERROR')):
+            self.w.refresh('oscilloscope', periodic=True)
+            try:
+                self.w.laser.arm.click()
+                self.assertTrue(self.w.jobs.running('shot'))
+            finally:
+                release.set()
+            self.idle()
+        self.assertIn('Scope test read failed', self.w.laser.phase.text())
+        self.laser.arm_single_shot.assert_not_called()
+        self.assertNotIn(':WGEN:OUTPut 1', self.inst.commands)
 
     def test_stale_pressure_and_gauge_switch_clear_the_live_value(self):
         self.connect('vacuum')
@@ -463,7 +619,6 @@ class DesktopTests(unittest.TestCase):
         for key in ('laser', 'oscilloscope'):
             self.w.panels[key].connection.click()
             self.wait_for(lambda: key in self.w.connected and not self.w.jobs.busy(key))
-        self.w.laser.load.setCurrentIndex(1)
         self.w.laser.arm.click()
         self.wait_for(self.w.laser.fire.isEnabled)
         self.assertFalse(page.apply.isEnabled())

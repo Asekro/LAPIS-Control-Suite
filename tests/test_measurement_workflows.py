@@ -47,7 +47,6 @@ class ShotTests(unittest.TestCase):
         self.laser.turn_off.side_effect = lambda: self.switch(False)
         self.scope = Mock(spec=KeysightDSOX1204G, idn='DSOX1204G,TEST')
         self.scope.wavegen_state.return_value = {'output': False}
-        self.scope.operation_status.return_value = {'waiting_for_trigger': True}
         self.scope.wait_until_armed.side_effect = lambda **kw: self.events.append('scope ready')
         self.scope.timed_ttl_window.side_effect = lambda *a, **kw: self.pulses(1)
         self.scope.wait_for_single.side_effect = lambda **kw: self.events.append('fresh acquisition')
@@ -79,7 +78,8 @@ class ShotTests(unittest.TestCase):
         self.assertEqual(count, 501)
         self.assertEqual(measurement.metadata['laser_counts'], (500, 501))
         self.assertEqual(measurement.labels, {1:'Signal 1', 2:'Signal 2'})
-        self.scope.configure_ttl.assert_called_once_with(load='HIGHZ', frequency_hz=.1, pulse_width_s=50e-6)
+        self.scope.configure_ttl.assert_called_once_with(load='HIGHZ', low_v=0, high_v=5, frequency_hz=.1,
+                                                        pulse_width_s=50e-6)
         self.scope.read_waveforms.assert_called_once_with((1, 2), points=10000, stop=False)
 
     def test_zero_multiple_and_reversed_counts_never_succeed_or_retry(self):
@@ -140,11 +140,15 @@ class ShotTests(unittest.TestCase):
         self.assertEqual(missing.exception.count, self.count)
         self.scope.read_waveforms.assert_not_called()
 
-    def test_stale_scope_or_changed_bender_block_trigger(self):
-        self.scope.operation_status.side_effect = [{'waiting_for_trigger': True}, {'waiting_for_trigger': False}]
-        with self.assertRaisesRegex(RuntimeError, 'no longer waiting'):
+    def test_scope_triggered_before_laser_enable_blocks_arming(self):
+        self.scope.require_untriggered_single.side_effect = RuntimeError('Premature trigger')
+        with self.assertRaisesRegex(RuntimeError, 'Premature trigger'):
             self.run_shot()
-        self.scope.operation_status.side_effect = None
+        self.laser.arm_single_shot.assert_not_called()
+        self.scope.timed_ttl_window.assert_not_called()
+        self.scope.stop.assert_called_once_with()
+
+    def test_changed_bender_blocks_trigger(self):
         check = Mock(side_effect=[{'electrodes': {'p0': {'enabled': True,'target_v': 15}}},
                                   {'electrodes': {'p0': {'enabled': False,'target_v': 15}}}])
         with self.assertRaisesRegex(RuntimeError, 'electrode setting changed'):

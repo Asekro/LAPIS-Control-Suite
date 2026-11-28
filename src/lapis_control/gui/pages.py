@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QGridLayout, QHBoxLayout, QLineEdit, QListWidget,
                                QVBoxLayout, QWidget)
 
+from lapis_control.workflows.laser_shot import DEFAULT_ARM_TIMEOUT_S
 from lapis_control.workflows.measurement import ChannelSetup, Measurement, ScopeSetup, waveform_statistics
 from .plot import TracePlot
 from .widgets import Card, Details, button, combo, fields, icon, label, number, row
@@ -178,8 +179,10 @@ class LaserPage(InstrumentPage):
         self.box.addWidget(card)
         shot = Card('Einzelschuss')
         self.source = combo(['Oszilloskop · WaveGen', 'Externe Einzelpulsquelle'])
-        self.load = combo(['Last am Aufbau wählen …', 'Hochohmig (High Z)', '50 Ω'])
-        shot.box.addLayout(fields([('Triggerquelle', self.source), ('Angeschlossene WaveGen-Last', self.load)], 2))
+        self.arm_timeout = number(DEFAULT_ARM_TIMEOUT_S, 1, 60, digits=0)
+        self.arm_timeout.setSuffix(' s')
+        self.arm_timeout.setToolTip('Zeit ab bestätigter Laserfreigabe bis zur automatischen Abschaltung.')
+        shot.box.addLayout(fields([('Triggerquelle', self.source), ('Scharfstellzeit', self.arm_timeout)], 2))
         self.hint = label('', 'muted', wrap=True)
         shot.box.addWidget(self.hint)
         self.phase = label('Laser nicht scharfgestellt', 'title', wrap=True)

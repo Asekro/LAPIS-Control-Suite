@@ -18,6 +18,13 @@ Die tatsächlich registrierte Pulszahl liefert anschließend der Laser.
 Die zeitliche Begrenzung wurde offline getestet. Bedienung, Kurvenexport und
 Auswertung sind in der [Projektanleitung](../../../../README.md#am-arbeitsplatz) beschrieben.
 
+Beim Scharfstellen wartet der Laser-Tab auf die Bereitschaft der neuen
+Single-Aufnahme (`:AER?`). Das Lesen löscht dieses Ereignis. Direkt vor der
+Laserfreigabe und vor dem WaveGen-Start prüft `require_untriggered_single()`,
+ob die Aufnahme noch läuft (RUN) und ob bereits eine Flanke eingetroffen ist
+(`:TER?`). Bei einer vorzeitigen Flanke oder einer gestoppten Aufnahme zeigt
+die Fehlermeldung den Trigger- und Registerzustand an. [Keysight-Programmierhandbuch, Abschnitte AER, OPERegister:CONDition und TER](https://www.keysight.com/us/en/assets/9018-07747/programming-guides/9018-07747.pdf)
+
 ## Ordnerstruktur
 
 | Datei | Aufgabe |

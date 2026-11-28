@@ -192,7 +192,6 @@ class MainWindow(QMainWindow):
         self.bender.regulate.clicked.connect(self.regulate)
         self.bender.stop.clicked.connect(lambda: self.manual_bender('disable'))
         self.laser.source.currentIndexChanged.connect(self.sync)
-        self.laser.load.currentIndexChanged.connect(self.sync)
         self.laser.arm.clicked.connect(self.arm)
         self.laser.fire.clicked.connect(self.fire)
         self.laser.abort.clicked.connect(lambda: self.cancel_job('shot'))
@@ -372,7 +371,7 @@ class MainWindow(QMainWindow):
         if self.closing or not self.connected.issuperset(keys) or self.disconnect_pending.intersection(keys):
             return False
         started = self.jobs.start(name, keys, work, done, lambda e: self.failed(keys, e, title),
-                                  after_read=keys == ('bender',))
+                                  after_reads=keys if keys in (('bender',), ('laser',)) else ())
         if started:
             self.notice(title + ' …')
         return started
@@ -602,6 +601,9 @@ class MainWindow(QMainWindow):
         self.sync()
 
     def laser_off(self) -> None:
+        if self.jobs.running('laser-off'):
+            return
+        self.jobs.discard_waiting_action('laser')
         if self.jobs.running('shot'):
             self.cancel_job('shot')
             return
@@ -614,34 +616,38 @@ class MainWindow(QMainWindow):
         self.run_action('interlock', ('laser',), lambda _: laser.reset_interlock_fault(),
                         lambda _: self.action_done('laser', 'Interlockquittierung'), 'Interlock quittieren')
 
+    def can_arm(self) -> bool:
+        return (not self.closing and 'laser' in self.connected
+                and (self.laser.source.currentIndex() != 0 or 'oscilloscope' in self.connected)
+                and self.disconnect_pending.isdisjoint(('laser', 'oscilloscope', 'bender'))
+                and not self.jobs.busy('laser', 'oscilloscope', 'bender-shot', include_reads=False)
+                and (not self.jobs.busy('bender', include_reads=False) or self.can_update_targets()))
+
     def arm(self) -> None:
-        timed = self.laser.source.currentIndex() == 0
-        load = (None, 'HIGHZ', '50OHM')[self.laser.load.currentIndex()] if timed else None
-        if timed and (load is None or 'oscilloscope' not in self.connected):
+        if not self.can_arm():
             return
         scope = self.devices['oscilloscope'] if 'oscilloscope' in self.connected else None
+        load = 'HIGHZ' if self.laser.source.currentIndex() == 0 else None
         keys = ('laser', 'oscilloscope', 'bender-shot')
-        if (self.closing or self.disconnect_pending.intersection(('laser', 'oscilloscope', 'bender'))
-                or self.jobs.busy(*keys)):
-            return
         control = self.bender_control if 'bender' in self.connected else None
         regulating = self.jobs.running('regulation')
         targets = self.regulation_targets if regulating else None
         tolerance = self.bender.options['tolerance_v'].value()
-        if control:
-            if self.jobs.busy('bender') and not self.can_update_targets():
-                return
         laser = self.devices['laser']
         setup = self.scope.setup()
         pressure = self.pressure_context()
+        arm_timeout_s = self.laser.arm_timeout.value()
         self.armed = False
         self.fire_request = fire = Event()
         self.laser.phase.setText('Interlock, Trigger und Aufnahmebereitschaft werden geprüft …')
 
+        def progress(stage: str) -> None:
+            self.jobs.progress.emit('shot', (stage, time.monotonic() + arm_timeout_s))
+
         def work(cancel: Event) -> tuple:
             return acquire_shot(laser, scope, setup, load=load, fire=fire, cancel=cancel,
-                                bender_check=(lambda: control.shot_snapshot(targets, tolerance, cancel)) if control else None,
-                                progress=lambda stage: self.jobs.progress.emit('shot', (stage, time.monotonic()+15)))
+                                arm_timeout_s=arm_timeout_s, progress=progress,
+                                bender_check=(lambda: control.shot_snapshot(targets, tolerance, cancel)) if control else None)
 
         def done(result: tuple) -> None:
             self.armed = False
@@ -669,7 +675,7 @@ class MainWindow(QMainWindow):
             self.failed(tuple(k for k in keys if k in NAMES), error, 'Laser / Messung')
             self.next_read['laser'] = 0
 
-        self.jobs.start('shot', keys, work, done, failure)
+        self.jobs.start('shot', keys, work, done, failure, after_reads=('laser', 'oscilloscope', 'bender'))
 
     def fire(self) -> None:
         if self.armed and self.jobs.running('shot') and time.monotonic() < self.arm_deadline:
@@ -809,8 +815,6 @@ class MainWindow(QMainWindow):
                 self.arm_deadline = deadline
                 self.laser.emission.setText('SCHARF')
                 self.laser.interlock.setText('Geschlossen')
-                if self.armed:
-                    self.laser.phase.setText('Laser scharf · Triggerfenster offen')
                 self.overview.summaries['laser'].setText('Laser scharf · Triggerfenster offen')
             else:
                 self.armed = False
@@ -818,12 +822,18 @@ class MainWindow(QMainWindow):
                 self.laser.phase.setText('Ein Puls bestätigt · Scope-Aufnahme wird geprüft')
             self.sync()
 
+    def _update_shot_message(self, now: float) -> None:
+        if self.armed:
+            remaining = max(0, int(np.ceil(self.arm_deadline - now)))
+            self.laser.phase.setText(f'Laser scharf · noch {remaining} s')
+        self.shot_message.setText(self.laser.phase.text())
+
     def sync(self) -> None:
         online = self.connected - self.disconnect_pending
 
         def available(key: str) -> bool:
             return (key in online and not self.closing
-                    and not self.jobs.busy(key, include_reads=key not in ('vacuum', 'bender'))
+                    and not self.jobs.busy(key, include_reads=key == 'oscilloscope')
                     and not (key == 'bender' and self.jobs.busy('bender-shot')))
         self.file_button.setEnabled(not self.connected and not self.jobs.active and not self.closing)
         missing = self.devices.keys() - self.connected
@@ -874,23 +884,23 @@ class MainWindow(QMainWindow):
             editor.setEnabled(not regulating and not self.closing)
         shot = self.jobs.running('shot')
         self.shot_banner.setVisible(shot)
-        self.shot_message.setText(self.laser.phase.text())
+        now = time.monotonic()
+        self._update_shot_message(now)
         self.shot_stop.setEnabled(not self.closing)
         self.profile_button.setEnabled(not (self.closing or shot or regulating))
         timed = self.laser.source.currentIndex() == 0
         self.laser.hint.setText(
-            'Interlock im Labor schließen und Anschlusslast prüfen. WaveGen läuft mit 0,1 Hz. Der PC fordert AUS beim ersten Scope-Trigger oder nach maximal 8 s an. Der Kopfzähler prüft, wie viele Pulse tatsächlich registriert wurden.'
+            'Interlock im Labor schließen. WaveGen ist auf Rechteckpulse von 0 bis 5 V eingestellt, '
+            '50 µs breit bei 0,1 Hz. Der PC fordert AUS beim ersten Scope-Trigger oder nach maximal 8 s an. '
+            'Der Kopfzähler prüft die Pulszahl.'
             if timed else 'Interlock im Labor schließen. Nach dem Scharfstellen einen externen Einzelpuls zuführen. Ein verbundenes Scope zeichnet mit den gewählten Kanaleinstellungen auf.')
         self.laser.source.setEnabled(not shot and not self.closing)
-        self.laser.load.setEnabled(timed and not shot and not self.closing)
-        scope_ready = not self.jobs.busy('oscilloscope') and ('oscilloscope' in self.connected or not timed)
-        bender_ready = not self.jobs.busy('bender') or self.can_update_targets()
-        self.laser.arm.setEnabled(available('laser') and scope_ready and bender_ready
-                                  and self.disconnect_pending.isdisjoint(('oscilloscope', 'bender'))
-                                  and (not timed or self.laser.load.currentIndex()>0))
-        self.laser.fire.setEnabled(timed and self.armed and shot and not self.closing and time.monotonic()<self.arm_deadline)
+        self.laser.arm_timeout.setEnabled(not shot and not self.closing)
+        self.laser.arm.setEnabled(self.can_arm())
+        self.laser.fire.setEnabled(timed and self.armed and shot and not self.closing and now < self.arm_deadline)
         self.laser.abort.setEnabled(shot and not self.closing)
-        self.laser.off.setEnabled((available('laser') or shot) and not self.closing)
+        self.laser.off.setEnabled('laser' in online and not self.closing and not self.jobs.running('laser-off')
+                                  and (available('laser') or shot or self.jobs.waiting_action('laser') is not None))
         self.laser.reset.setEnabled(available('laser'))
         for btn in (self.scope.apply, self.scope.single, self.scope.download, self.scope.wave_off):
             btn.setEnabled(available('oscilloscope'))
@@ -910,10 +920,8 @@ class MainWindow(QMainWindow):
         now = time.monotonic()
         self.show_pressure()
         if self.armed:
-            remaining = max(0, int(np.ceil(self.arm_deadline-now)))
-            self.laser.phase.setText(f'Scharf · noch {remaining} s')
-            self.shot_message.setText(f'Laser scharf · Triggerfenster noch {remaining} s')
-            self.laser.fire.setEnabled(self.laser.source.currentIndex() == 0 and remaining > 0)
+            self._update_shot_message(now)
+            self.laser.fire.setEnabled(self.laser.source.currentIndex() == 0 and now < self.arm_deadline)
         for key in self.connected.copy():
             if now >= self.next_read.get(key, 0) and (key == 'vacuum' or key == self.selection):
                 self.refresh(key, periodic=True)

@@ -32,7 +32,7 @@ class Jobs(QObject):
         super().__init__(parent)
         self.pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix='lapis')
         self.active: dict[int, Job] = {}
-        self.after_read: dict[int, tuple[int, Callable[[Exception | None], None]]] = {}
+        self.waiting: dict[int, tuple[set[int], Callable[[Exception | None], None]]] = {}
         self.sequence = 0
         self.delivered.connect(self.finish, Qt.ConnectionType.QueuedConnection)
 
@@ -43,11 +43,16 @@ class Jobs(QObject):
 
     def start(self, name: str, resources: tuple[str, ...], work: Callable[[Event], Any],
               success: Callable[[Any], None], failure: Callable[[Exception], None], *,
-              after_read: bool = False) -> bool:
+              after_reads: tuple[str, ...] = ()) -> bool:
+        """Reserve resources now and wait for ongoing status reads on the named devices."""
         requested = set(resources)
-        blockers = [token for token, job in self.active.items() if not requested.isdisjoint(job.resources)]
-        if blockers and not (after_read and len(blockers) == 1 and self.active[blockers[0]].name == 'read'):
-            return False
+        read_resources = set(after_reads)
+        blockers = set()
+        for read_token, job in self.active.items():
+            if job.name == 'read' and not read_resources.isdisjoint(job.resources):
+                blockers.add(read_token)
+            elif not requested.isdisjoint(job.resources):
+                return False
         self.sequence += 1
         token = self.sequence
         cancel = Event()
@@ -64,16 +69,17 @@ class Jobs(QObject):
                 self.delivered.emit(token, None, exc)
             else:
                 self.delivered.emit(token, value, None)
+
         def dispatch(read_error: Exception | None) -> None:
             if cancel.is_set():
                 self.finish(token, None, InterruptedError('Queued operation cancelled.'))
-            elif read_error is not None and name != 'disable':
+            elif read_error is not None and name not in ('disable', 'laser-off'):
                 self.finish(token, None, read_error)
             else:
                 self.pool.submit(run)
 
         if blockers:
-            self.after_read[blockers[0]] = (token, dispatch)
+            self.waiting[token] = (blockers, dispatch)
         else:
             self.pool.submit(run)
         self.changed.emit()
@@ -88,10 +94,12 @@ class Jobs(QObject):
             else:
                 job.failure(error)
         finally:
-            queued = self.after_read.pop(token, None)
-            if queued is not None:
-                _, dispatch = queued
-                dispatch(error)
+            for queued, (reads, dispatch) in list(self.waiting.items()):
+                if token in reads:
+                    reads.remove(token)
+                    if not reads or error is not None:
+                        del self.waiting[queued]
+                        dispatch(error)
             self.finished.emit()
             self.changed.emit()
 
@@ -104,14 +112,14 @@ class Jobs(QObject):
         return any(job.name == name for job in self.active.values())
 
     def waiting_action(self, resource: str) -> int | None:
-        """Return the read token preceding a queued action for this resource."""
-        return next((read for read, (token, _) in self.after_read.items()
+        """Return the queued action reserving this resource, if any."""
+        return next((token for token in self.waiting
                      if resource in self.active[token].resources), None)
 
     def discard_waiting_action(self, resource: str) -> None:
-        read = self.waiting_action(resource)
-        if read is not None:
-            token, _ = self.after_read.pop(read)
+        token = self.waiting_action(resource)
+        if token is not None:
+            del self.waiting[token]
             self.finish(token, None, InterruptedError('Queued operation cancelled.'))
 
 

@@ -11,6 +11,7 @@ from lapis_control.devices.oscilloscope.keysight_dsox1204g import KeysightDSOX12
 from .measurement import Measurement, ScopeSetup
 
 MAX_GATE_S = 8.0
+DEFAULT_ARM_TIMEOUT_S = 15.0
 
 class ShotTraceError(RuntimeError):
     """One physical pulse was counted, but its trace could not be returned."""
@@ -53,8 +54,6 @@ def _wait_for_trigger(laser: FlareNx, scope: KeysightDSOX1204G | None, timed: bo
             _check_armed(laser)
             if laser.read_pulse_count() != before:
                 raise RuntimeError('External pulse detected before requested WaveGen start.')
-            if not scope.operation_status()['waiting_for_trigger']:
-                raise RuntimeError('Oscilloscope no longer waiting for the trigger.')
             if laser.read_system_status() & SystemStatus.TRIGGER_INPUT:
                 raise RuntimeError('Trigger input is already active.')
             check_cancel(cancel)
@@ -64,7 +63,7 @@ def _wait_for_trigger(laser: FlareNx, scope: KeysightDSOX1204G | None, timed: bo
 
 def acquire_shot(laser: FlareNx, scope: KeysightDSOX1204G | None, setup: ScopeSetup, *,
                  load: str | None, fire: Event, cancel: Event,
-                 progress: Callable[[str], None], arm_timeout_s: float = 15.0,
+                 progress: Callable[[str], None], arm_timeout_s: float = DEFAULT_ARM_TIMEOUT_S,
                  bender_check: Callable[[], dict] | None = None) -> tuple[int, Measurement | None]:
     """Use one operator arm per attempt. load=None selects an external single-pulse source.
 
@@ -101,17 +100,17 @@ def acquire_shot(laser: FlareNx, scope: KeysightDSOX1204G | None, setup: ScopeSe
                 raise RuntimeError('WaveGen is running. Switch it off before arming.')
             setup.apply(scope)
             if load is not None:
-                scope.configure_ttl(load=load, frequency_hz=0.1, pulse_width_s=50e-6)
+                scope.configure_ttl(load=load, low_v=0, high_v=5, frequency_hz=0.1, pulse_width_s=50e-6)
         laser.configure_single_shot()
         check_cancel(cancel)
         if scope is not None:
             pending = True
             scope.arm_single()
             scope.wait_until_armed(cancel=cancel)
-            if not scope.operation_status()['waiting_for_trigger']:
-                raise RuntimeError('Scope did not remain ready for a fresh trigger.')
         before = laser.read_pulse_count()
         check_electrodes()
+        if scope is not None:
+            scope.require_untriggered_single()
         check_cancel(cancel)
         try:
             laser.arm_single_shot()

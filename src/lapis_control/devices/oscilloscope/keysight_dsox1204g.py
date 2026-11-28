@@ -426,6 +426,22 @@ class KeysightDSOX1204G:
         """Wait for a fresh AER event; this does not guarantee external signal timing."""
         self._wait_single(timeout_s, poll_s, True, cancel)
 
+    def require_untriggered_single(self) -> None:
+        """Verify a pending Single is still running and preserve any trigger event read."""
+        with self._lock:
+            if not self._single_pending:
+                raise ScopeError("No Single acquisition pending.")
+            # AER clears on read. Its Wait Trig summary need not persist after wait_until_armed().
+            status = self.operation_status()
+            self._trigger_seen |= bool(int(self.query_scpi(":TER?")))
+            register = status["register"]
+            if self._trigger_seen:
+                raise ScopeError(f"Premature trigger on the oscilloscope (TER=1, OPER=0x{register:X}). "
+                                 "Check the trigger channel, slope and level.")
+            if not status["running"]:
+                raise ScopeError("Oscilloscope Single acquisition stopped before the trigger "
+                                 f"(TER=0, OPER=0x{register:X}).")
+
     def wait_for_single(self, timeout_s: float = 10.0, poll_s: float = 0.02, *, cancel: Event | None = None) -> None:
         """Require a fresh TER event AND a stopped device; never accept stale data."""
         self._wait_single(timeout_s, poll_s, False, cancel)
@@ -665,8 +681,7 @@ class KeysightDSOX1204G:
             if state["output"] or period < 1 or state["pulse_width_s"] >= duration:
                 raise ScopeError("Pulse window requires an idle, slow generator and a sub-period gate.")
             self.check_errors()
-            if self._trigger_seen or int(self.query_scpi(":TER?")):
-                raise ScopeError("Premature trigger; WaveGen was not started.")
+            self.require_untriggered_single()
             if cancel.is_set():
                 raise InterruptedError("Trigger cancelled.")
             if deadline is not None and time.monotonic() >= deadline:
