@@ -5,12 +5,17 @@ import logging
 import math
 import re
 from threading import RLock
+import time
 from types import TracebackType
 
 import serial
 
 BAUDRATE = 9600
 TERMINATOR = b"\r"
+log = logging.getLogger(__name__)
+_FRAME = re.compile(rb"([=*])V([0-9]{1,5}) ([\x20-\x7e]+)\r")
+_FRAME_LIMIT = 256
+_POLL_S = 0.005
 _READ_OBJECTS = frozenset({802, 808, 852, 859, 904, 905, 906, 907, 908, 909, 910,
                            911, 912, 913, 914, 915, 919, 920, 924})
 
@@ -328,6 +333,7 @@ class EdwardsTIC:
         self.timeout = timeout
         self.write_timeout = write_timeout
         self._serial: serial.Serial | None = None
+        self._pending_queries: list[int] = []
         self._lock = RLock()
 
     def connect(self) -> EdwardsTIC:
@@ -338,11 +344,14 @@ class EdwardsTIC:
                     self._serial = serial.Serial(
                         port=self.port, baudrate=BAUDRATE, bytesize=serial.EIGHTBITS,
                         parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE,
-                        timeout=self.timeout, write_timeout=self.write_timeout,
+                        # Nonblocking reads let the entire reply share one monotonic deadline.
+                        timeout=0, write_timeout=self.write_timeout,
                         xonxoff=False, rtscts=False, dsrdtr=False,
                     )
                 except serial.SerialException as exc:
                     raise EdwardsTicConnectionError(f"Cannot open {self.port}: {exc}") from exc
+                self._pending_queries.clear()
+                log.info("TIC connected on %s; reply timeout %.3f s", self.port, self.timeout)
             return self
 
     def close(self) -> None:
@@ -351,6 +360,7 @@ class EdwardsTIC:
             if self._serial is not None:
                 self._serial.close()
                 self._serial = None
+                log.info("TIC disconnected from %s", self.port)
 
     def __enter__(self) -> EdwardsTIC:
         return self.connect()
@@ -370,35 +380,110 @@ class EdwardsTIC:
             return self._serial is not None and self._serial.is_open
 
     def query_value(self, object_id: int) -> str:
-        """Read one supported telemetry object. Only this method writes to the port."""
+        """Read one supported telemetry object while holding exclusive ownership of the stream."""
         if type(object_id) is not int or object_id not in _READ_OBJECTS:
             raise ValueError("Expected a supported integer telemetry object ID.")
-        frame = f"?V{object_id}".encode("ascii") + TERMINATOR
         with self._lock:
             port = self._serial
             if port is None or not port.is_open:
                 raise EdwardsTicConnectionError("Serial connection is not open.")
             try:
-                port.reset_input_buffer()
-                if port.write(frame) != len(frame):
-                    raise EdwardsTicTimeoutError(f"Incomplete query for object {object_id}.")
-                raw = port.read_until(TERMINATOR, size=256)
+                if self._pending_queries or port.in_waiting:
+                    self._drain_input(port)
+                if object_id in self._pending_queries:
+                    self._synchronize_for(port, object_id)
+                self._pending_queries.append(object_id)
+                try:
+                    value = self._exchange(port, object_id)
+                except EdwardsTicCommandError:
+                    self._pending_queries.clear()  # A complete, correlated controller response.
+                    raise
+                self._pending_queries.clear()
+                return value
             except serial.SerialTimeoutException as exc:
                 raise EdwardsTicTimeoutError(f"Timeout querying {object_id}.") from exc
             except serial.SerialException as exc:
                 raise EdwardsTicConnectionError(f"Communication failed on {self.port}.") from exc
-        if not raw.endswith(TERMINATOR):
-            raise EdwardsTicTimeoutError(f"Incomplete reply for object {object_id}: {raw!r}")
-        match = re.fullmatch(rb"([=*])V([0-9]{1,5}) ([\x20-\x7e]+)\r", raw)
-        if not match or int(match[2]) != object_id:
-            raise EdwardsTicProtocolError(f"Unexpected reply for object {object_id}: {raw!r}")
-        payload = match[3].decode("ascii")
-        if match[1] == b"*":
-            if not re.fullmatch(r"[0-9]{1,2}", payload):
-                raise EdwardsTicProtocolError(f"Malformed controller error: {raw!r}")
-            code = int(payload)
-            raise EdwardsTicCommandError(object_id, code, self.ERROR_CODES.get(code, "Unknown error"))
-        return payload
+
+    def _synchronize_for(self, port: serial.Serial, object_id: int) -> None:
+        # Replies have no sequence number. A reply to a different, later query
+        # establishes that an older reply for object_id can no longer be in flight.
+        marker = self._pending_queries[-1]
+        if marker == object_id:
+            candidates = (920, 919, *sorted(_READ_OBJECTS))
+            marker = next((i for i in candidates if i not in self._pending_queries), None)
+            if marker is None:
+                raise EdwardsTicProtocolError(f"{self.port}: TIC replies lost synchronization; reconnect the port.")
+            self._pending_queries.append(marker)
+        log.info("%s resynchronizing object %d with read-only ?V%d", self.port, object_id, marker)
+        try:
+            self._exchange(port, marker)
+        except EdwardsTicCommandError as exc:
+            # Even a controller rejection identifies the end of this exchange.
+            log.info("%s synchronization reply: %s", self.port, exc)
+        self._pending_queries[:] = [marker]  # A repeated marker may still have a reply in flight.
+
+    def _drain_input(self, port: serial.Serial) -> None:
+        """After a lost exchange, consume late bytes before sending the next query."""
+        quiet_s = min(0.5, self.timeout)  # Edwards' suggested master timeout, §1.4.
+        now = time.monotonic()
+        quiet_until, deadline = now + quiet_s, now + self.timeout + quiet_s
+        while now < deadline:
+            waiting = port.in_waiting
+            if waiting:
+                raw = port.read(min(waiting, _FRAME_LIMIT))
+                log.warning("%s discarded buffered RX; pending queries %s: %r", self.port, self._pending_queries, raw)
+                quiet_until = time.monotonic() + quiet_s
+            elif now >= quiet_until:
+                return
+            else:
+                time.sleep(min(_POLL_S, quiet_until-now))
+            now = time.monotonic()
+        raise EdwardsTicProtocolError(f"{self.port}: no quiet interval while resynchronizing TIC input.")
+
+    def _exchange(self, port: serial.Serial, object_id: int) -> str:
+        frame = f"?V{object_id}".encode("ascii") + TERMINATOR
+        log.debug("%s TX %r", self.port, frame)
+        if port.write(frame) != len(frame):
+            raise EdwardsTicTimeoutError(f"Incomplete query for object {object_id}.")
+        start = time.monotonic()
+        deadline = start + self.timeout
+        buffer = bytearray()
+        last_unexpected = b""
+        while (remaining := deadline - time.monotonic()) > 0:
+            waiting = port.in_waiting
+            if not waiting:
+                time.sleep(min(_POLL_S, remaining))
+                continue
+            buffer.extend(port.read(min(waiting, _FRAME_LIMIT)))
+            while (end := buffer.find(TERMINATOR)) >= 0:
+                raw = bytes(buffer[:end + 1])
+                del buffer[:end + 1]
+                elapsed = (time.monotonic() - start) * 1000
+                log.debug("%s RX for %d after %.1f ms: %r", self.port, object_id, elapsed, raw)
+                if len(raw) > _FRAME_LIMIT:
+                    raise EdwardsTicProtocolError(f"Oversized reply for object {object_id}: {raw!r}")
+                match = _FRAME.fullmatch(raw)
+                if not match or int(match[2]) != object_id:
+                    last_unexpected = raw
+                    log.warning("%s discarded RX while waiting for object %d: %r", self.port, object_id, raw)
+                    continue
+                if buffer:
+                    log.warning("%s discarded trailing RX after object %d: %r", self.port, object_id, bytes(buffer))
+                payload = match[3].decode("ascii")
+                if match[1] == b"*":
+                    if not re.fullmatch(r"[0-9]{1,2}", payload):
+                        raise EdwardsTicProtocolError(f"Malformed controller error: {raw!r}")
+                    code = int(payload)
+                    raise EdwardsTicCommandError(object_id, code, self.ERROR_CODES.get(code, "Unknown error"))
+                return payload
+            if len(buffer) >= _FRAME_LIMIT:
+                raise EdwardsTicProtocolError(f"Unterminated reply for object {object_id}: {bytes(buffer)!r}")
+        if last_unexpected and not buffer:
+            raise EdwardsTicProtocolError(f"No matching reply for object {object_id} within {self.timeout:g} s; "
+                                         f"last unexpected frame: {last_unexpected!r}")
+        raise EdwardsTicTimeoutError(f"Timeout reading object {object_id} after {self.timeout:g} s; "
+                                     f"partial reply: {bytes(buffer)!r}")
 
     # ==========================================================================
     # internal helper methods for TIC & nEXT payload parsing and fault checking

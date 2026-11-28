@@ -21,6 +21,7 @@ class FakeSerial:
         self.echo = True
         self.drop = False
         self.volts = [0.] * 6
+        self.measured_current = [1.2e-9] * 6
         self.measurement_offset = 0.0
         self.extra_status = ChannelStatus(0)
         self.on = [False] * 6
@@ -59,7 +60,7 @@ class FakeSerial:
         elif cmd.startswith(':READ:VOLT?'): response = f'{self.volts[ch]}V'
         elif cmd.startswith(':MEAS:VOLT?'): response = f'{self.volts[ch] + self.measurement_offset}V'
         elif cmd.startswith(':READ:CURR?'): response = '1.0E-3A'
-        elif cmd.startswith(':MEAS:CURR?'): response = '1.2E-9A'
+        elif cmd.startswith(':MEAS:CURR?'): response = f'{self.measured_current[ch]}A'
         elif cmd == ':READ:RAMP:VOLT?': response = '20.0%/s'
         elif cmd == ':READ:MODULE:TEMPERATURE?': response = '30.0C'
         else: raise AssertionError(f'Unmodeled command {cmd}')

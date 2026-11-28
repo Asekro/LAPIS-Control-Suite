@@ -20,15 +20,17 @@ Interpreter als Notebook-Kernel verwenden. Die Notebooks liegen unter
 `src/lapis_control/devices/bender/`, `src/lapis_control/devices/laser/` und `src/lapis_control/devices/oscilloscope/`.
 Ihre Konfiguration erkennt den Projekt-Checkout auch aus dem Geräteordner.
 
-Optional für die spätere GUI:
+Für die Desktop-Anwendung:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e ".[gui]"
+.\.venv\Scripts\python.exe -m lapis_control.gui
 ```
 
 Die [Qt-Anleitung](https://doc.qt.io/qtforpython-6/gettingstarted.html) beschreibt
-die Installation in einer virtuellen Umgebung. Aktuell existiert in diesem
-Projekt noch kein GUI-Startkommando.
+die Installation in einer virtuellen Umgebung. Unter Windows startet auch
+`LAPIS starten.cmd` im Projektordner die Oberfläche. Das installierte Startprogramm
+heißt `lapis-control`. Die GUI-Tests verwenden die Qt-Offscreen-Plattform.
 
 Alle Offline-Gerätetests:
 

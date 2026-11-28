@@ -17,6 +17,12 @@ Der automatische Test `python -m unittest discover -s src/lapis_control/devices/
 
 ## Installation unter Windows
 
+Die Desktop-Anwendung bietet zusätzlich einen getrennten WaveGen-Versuch mit
+zeitbegrenzter periodischer Ausgabe und anschließender Zählerprüfung. Für eine
+hardwareseitig begrenzte Einzelausgabe steht der Modus mit externer Quelle zur
+Verfügung. Die gespeicherten Ergebnisse dieses Notebooks stammen aus dem
+extern ausgelösten Versuch. [Desktop-Bedienung](../../../../README.md#am-arbeitsplatz)
+
 1. Das LAPIS-Projekt öffnen. Dieser Treiber liegt unter `src/lapis_control/devices/laser/`.
 2. Python 3.10 oder neuer und die Python-Erweiterung für VS Code installieren.
 3. Für die gemeinsame Umgebung der Anleitung in der Projekt-README folgen. Für eine separate Treiberumgebung die folgenden Befehle aus diesem Ordner ausführen.

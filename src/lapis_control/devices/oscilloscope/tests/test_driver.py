@@ -2,6 +2,7 @@
 from collections import deque
 import struct
 from pathlib import Path
+from threading import Event
 import sys
 import unittest
 from unittest.mock import Mock, patch
@@ -271,6 +272,49 @@ class DriverTests(unittest.TestCase):
     def test_gate_rejects_running_generator(self):
         self.inst.values[':WGEN:OUTPut?']='1'
         with self.assertRaises(ScopeError): experimental_wavegen_gate(self.scope)
+
+    def test_timed_window_off_before_error_queue_and_no_repeat(self):
+        self.scope.configure_ttl(load='HIGHZ')
+        self.scope.arm_single()
+        self.inst.commands.clear()
+        self.assertTrue(self.scope.timed_ttl_window(0.2, Event()))
+        on = self.inst.commands.index(':WGEN:OUTPut 1')
+        self.assertEqual(self.inst.commands[on:on+5], [':WGEN:OUTPut 1', ':WGEN:OUTPut?', ':TER?',
+                                                      ':WGEN:OUTPut OFF', ':WGEN:OUTPut?'])
+        self.scope.wait_for_single()
+        self.assertEqual(self.inst.timeout, 5000)
+        self.assertEqual(self.inst.values[':WGEN:OUTPut?'], '0')
+
+    def test_timed_window_cancel_deadline_and_lost_enable_ack(self):
+        self.scope.configure_ttl(load='HIGHZ')
+        self.inst.events_after_single = deque(['0'])
+        self.scope.arm_single()
+        self.inst.commands.clear()
+        stop = Event()
+        stop.set()
+        with self.assertRaises(InterruptedError):
+            self.scope.timed_ttl_window(0.15, stop)
+        with self.assertRaises(TimeoutError):
+            self.scope.timed_ttl_window(0.15, Event(), deadline=0)
+        self.assertNotIn(':WGEN:OUTPut 1', self.inst.commands)
+        self.inst.fail_enable = True
+        with self.assertRaisesRegex(ScopeError, 'OFF unconfirmed'):
+            self.scope.timed_ttl_window(0.15, Event())
+        self.assertEqual(self.inst.commands.count(':WGEN:OUTPut 1'), 1)
+        self.assertEqual(self.inst.values[':WGEN:OUTPut?'], '0')
+
+    def test_no_trigger_window_times_out_off_and_rejects_a_premature_edge(self):
+        self.scope.configure_ttl(load='HIGHZ')
+        self.inst.events_after_single = deque(['0'])
+        self.scope.arm_single()
+        self.assertFalse(self.scope.timed_ttl_window(.025, Event()))
+        self.assertEqual(self.inst.values[':WGEN:OUTPut?'], '0')
+        self.inst.events_after_single = deque(['1'])
+        self.scope.arm_single()
+        self.inst.commands.clear()
+        with self.assertRaisesRegex(ScopeError, 'Premature trigger'):
+            self.scope.timed_ttl_window(.1, Event())
+        self.assertNotIn(':WGEN:OUTPut 1', self.inst.commands)
     def test_close_off_after_transport_error(self):
         self.scope.configure_ttl(load='HIGHZ'); self.inst.fail_enable=True
         with self.assertRaises(pyvisa.errors.VisaIOError): self.scope.wavegen_output(True)

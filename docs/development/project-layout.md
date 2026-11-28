@@ -28,7 +28,7 @@ bestimmten Arbeitsplatzpfad.
 - **workflows:** Abläufe über mehrere Geräte. Die Vierkanalregelung am Bender
   koordiniert Einschalten, Einschwingen, Halten und Abfahren der beiden NHS-Module.
 - **gui:** Darstellung und Benutzereingaben; blockierende Geräteoperationen laufen
-  später in Workern. Die GUI implementiert keine SCPI-Kommandos.
+  in Workern. Die GUI implementiert keine SCPI-Kommandos.
 - **config:** Zentrale Kommunikationsparameter und lokale Aufbaudaten.
   `lapis_control/configuration.py` prüft eine ausdrücklich gewählte Datei und
   erzeugt unverbundene Geräteobjekte; die Treiber lesen selbst keine Dateien.

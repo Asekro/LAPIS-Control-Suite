@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import logging
 import math
-from threading import RLock
+from threading import Event, RLock
 import time
 from typing import Final
 
@@ -387,7 +387,7 @@ class KeysightDSOX1204G:
             self._single_pending = True
             self.check_errors()
 
-    def _wait_single(self, timeout_s, poll_s, armed_only):
+    def _wait_single(self, timeout_s, poll_s, armed_only, cancel=None):
         timeout = _number(timeout_s, "timeout_s", 0.001)
         poll = _number(poll_s, "poll_s", 0.001, 1)
         with self._lock:
@@ -396,6 +396,8 @@ class KeysightDSOX1204G:
             deadline = time.monotonic() + timeout
             try:
                 while True:
+                    if cancel is not None and cancel.is_set():
+                        raise InterruptedError("Acquisition cancelled.")
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise AcquisitionTimeout("No new acquisition or trigger readiness before timeout.")
@@ -420,13 +422,13 @@ class KeysightDSOX1204G:
                         log.exception("Acquisition stop not confirmed after an error")
                 raise
 
-    def wait_until_armed(self, timeout_s=5.0, poll_s=0.01):
+    def wait_until_armed(self, timeout_s: float = 5.0, poll_s: float = 0.01, *, cancel: Event | None = None) -> None:
         """Wait for a fresh AER event; this does not guarantee external signal timing."""
-        self._wait_single(timeout_s, poll_s, True)
+        self._wait_single(timeout_s, poll_s, True, cancel)
 
-    def wait_for_single(self, timeout_s=10.0, poll_s=0.02):
+    def wait_for_single(self, timeout_s: float = 10.0, poll_s: float = 0.02, *, cancel: Event | None = None) -> None:
         """Require a fresh TER event AND a stopped device; never accept stale data."""
-        self._wait_single(timeout_s, poll_s, False)
+        self._wait_single(timeout_s, poll_s, False, cancel)
 
     def digitize(self, channels=(1, 2), *, timeout_s=10.0):
         """Blocking acquisition, including averaging; waits for the configured trigger.
@@ -645,6 +647,65 @@ class KeysightDSOX1204G:
                     except Exception:
                         log.exception("WaveGen shutdown attempt failed; check the device")
                 raise
+
+    def timed_ttl_window(self, max_on_s: float, cancel: Event, *, deadline: float | None = None) -> bool:
+        """Stop the periodic source at the first fresh scope trigger or gate deadline.
+
+        Preserve the clear-on-read trigger event for wait_for_single(). An
+        independent time limit also applies if the capture input sees no edge.
+        Host timing cannot guarantee a physical pulse count.
+        """
+        with self._lock:
+            if self._ttl_config is None or not self._single_pending:
+                raise ScopeError("Configure TTL and arm a fresh acquisition before gating.")
+            state = self.wavegen_state()
+            self._verify_ttl(state, self._ttl_config)
+            period = 1 / state["frequency_hz"]
+            duration = min(_number(max_on_s, "max_on_s"), 0.8 * period)
+            if state["output"] or period < 1 or state["pulse_width_s"] >= duration:
+                raise ScopeError("Pulse window requires an idle, slow generator and a sub-period gate.")
+            self.check_errors()
+            if self._trigger_seen or int(self.query_scpi(":TER?")):
+                raise ScopeError("Premature trigger; WaveGen was not started.")
+            if cancel.is_set():
+                raise InterruptedError("Trigger cancelled.")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Operator arming window expired before WaveGen start.")
+            # Finish validation before ON. Bound each I/O during the gate and
+            # schedule OFF from before the write, including acknowledgement latency.
+            self._wavegen_touched = True
+            with self._timeout(min(0.25, 0.05 * period, self.timeout_ms / 1000)):
+                start = time.monotonic()
+                cutoff = start + duration
+                if deadline is not None:
+                    cutoff = min(cutoff, deadline)
+                if cutoff-start <= state["pulse_width_s"]:
+                    raise TimeoutError("Insufficient time left to open the TTL window.")
+                try:
+                    self.write_scpi(":WGEN:OUTPut 1")
+                    if self.query_scpi(":WGEN:OUTPut?") != "1":
+                        raise ScopeError("WaveGen ON not confirmed.")
+                    while not cancel.is_set() and time.monotonic() < cutoff:
+                        if int(self.query_scpi(":TER?")):
+                            self._trigger_seen = True
+                            cancel.wait(min(state["pulse_width_s"], max(0.0, cutoff-time.monotonic())))
+                            break
+                        cancel.wait(min(0.025, max(0.0, cutoff-time.monotonic())))
+                finally:
+                    # Even if the ON acknowledgement was lost and regular I/O
+                    # is blocked, issue OFF. A poisoned session cannot verify it.
+                    try:
+                        self._inst.write(":WGEN:OUTPut OFF")
+                        if self._io_failed or self.query_scpi(":WGEN:OUTPut?") != "0":
+                            raise ScopeError("WaveGen OFF unconfirmed; inspect the physical output.")
+                    except BaseException:
+                        self._io_failed = True
+                        self._ttl_config = None
+                        raise
+            if time.monotonic() - start >= period:
+                raise ScopeError("Late WaveGen shutdown; pulse count needs inspection.")
+            self.check_errors()
+            return self._trigger_seen
 
     def status(self):
         """Read basic status and measurement settings without resetting or changing outputs."""

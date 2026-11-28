@@ -9,6 +9,15 @@ WaveGen-Konfiguration und Ein-/Ausschalten am Gerät erfolgreich geprüft.
 28 Offline-Regressionstests ergänzen die Hardwaretests. Messwerte und verbleibende
 Grenzen stehen in [VALIDIERUNG.md](VALIDIERUNG.md).
 
+Die Desktop-Anwendung verwendet `timed_ttl_window()` für ein zeitbegrenztes
+WaveGen-Fenster. Vor dem Einschalten prüft der Treiber die zurückgelesenen
+Parameter. Beim ersten frischen Triggerereignis fordert er AUS an und bewahrt
+das Ereignis für die anschließende Single-Prüfung auf. Die zusätzliche
+Abschaltfrist schließt die Zeit für die Einschaltbestätigung ein.
+Die tatsächlich registrierte Pulszahl liefert anschließend der Laser.
+Die zeitliche Begrenzung wurde offline getestet. Bedienung, Kurvenexport und
+Auswertung sind in der [Projektanleitung](../../../../README.md#am-arbeitsplatz) beschrieben.
+
 ## Ordnerstruktur
 
 | Datei | Aufgabe |

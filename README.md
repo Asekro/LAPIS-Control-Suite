@@ -1,17 +1,34 @@
 # LAPIS Control Suite
 
-Python-Projekt zur Geräteansteuerung und späteren Automatisierung des LAPIS-Aufbaus.
-Aktuell vorhanden sind Treiber für den iseg-NHS-Bender, den Coherent Flare NX,
-das Keysight DSOX1204G und den Edwards TIC mit nEXT 300 und nXDS.
-Der TIC-Treiber liest den Druck und die Pumpendiagnose aus. Das Vakuum-Notebook
-enthält die am Aufbau über COM13 erfassten Messwerte.
-Bender und Oszilloskop wurden am Gerät getestet; der
-Laser-Treiber ist noch nicht vollständig am Gerät validiert.
+Desktop-Anwendung für Bender, Kammerdruck, Pumpendiagnose, Laser und Oszilloskop am LAPIS-Aufbau. PySide6 übernimmt die Bedienung. Gerätezugriffe und Dateiübertragungen laufen im Hintergrund.
 
-Die fünf [Architekturentscheidungen](docs/architecture/README.md) aus
-`Asekro/LA-TOF-MS-ControlSuite` gelten auch hier. Sie wurden unverändert übernommen.
-Die [Bewertung vom 18.11.2026](docs/architecture/review-2026-11-18.md) beschreibt,
-was bereits passt und welche Umsetzungsschritte noch offen sind.
+## Desktop-Anwendung starten
+
+Unter Windows im Projektordner **LAPIS starten.cmd** doppelklicken. Bei einer neuen Installation zuerst die Projektumgebung einrichten:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[gui]"
+.\.venv\Scripts\python.exe -m lapis_control.gui
+```
+
+Über **Aufbau wählen** die JSON mit den COM-Ports, Seriennummern, Spannungsgrenzen und der VISA-Adresse laden. Als Vorlage dient [devices.example.json](config/devices.example.json). Eine lokale Kopie unter `config/devices.local.json` lädt die Anwendung beim Start aus dem Projektordner. Alternativ eine Datei mit `--config "Pfad\zum\aufbau.json"` angeben. **Geräte verbinden** öffnet die konfigurierten Verbindungen. Jedes Gerät lässt sich auch einzeln verbinden und bedienen. Eine vorhandene NPZ-Messung lässt sich direkt offline öffnen.
+
+## Am Arbeitsplatz
+
+- **Sitzungsprotokoll.** Unter **Laborübersicht → Sitzungsprotokoll → Logdatei öffnen** lässt sich das laufende Protokoll einsehen. Unter Windows liegt es standardmäßig in `%LOCALAPPDATA%\LAPIS Control Suite\logs\lapis-control.log`. Es enthält Bedienmeldungen, Gerätefehler und Ausnahmeursachen mit Zeitstempeln. Beim TIC stehen auch gesendete Abfragen, empfangene Telegramme, Antwortzeiten und verworfene Fragmente darin. Beim Neustart wird die Datei fortgeschrieben. Ab 4 MiB beginnt eine neue Datei, die letzten drei Vorgänger bleiben im selben Ordner. Mit `--log-dir "D:\LAPIS-Logs"` lässt sich der Ordner wählen.
+- **Geräte trennen.** Ein Klick während einer Statusabfrage merkt das Trennen vor. Das Gerät schließt, sobald die laufende Abfrage zurückkehrt. Die übrigen Geräte können währenddessen bereits getrennt werden. Während einer Aufnahme, Regelung oder eines Schaltvorgangs schützt die bestehende Gerätesperre den laufenden Vorgang.
+- **Vakuum.** Nach dem Verbinden liest die Anwendung etwa sekündlich die gewählte Messröhre. Der Druck in mbar bleibt beim Seitenwechsel sichtbar. Ein Lesefehler oder ein Alter ab vier Sekunden ersetzt die Zahl durch einen Strich. Das separate Pumpenmonitoring liest Zustand, Drehzahl bzw. Motorfrequenz, Leistung, Temperaturen und Meldungen von nEXT und nXDS im gewählten Intervall.
+- **Bender.** Für P0, P1, N0 und N1 vorzeichenrichtige Vorgaben eingeben. Mit **Sollwerte setzen** lassen sich die Spannungen auch bei aktiver HV ändern. Läuft gerade eine Statusabfrage, führt die Anwendung den Auftrag nach erfolgreichem Lesen aus. **HV einschalten** setzt die angezeigten Vorgaben und aktiviert die vier zuvor ausgeschalteten Kanäle. **Regelung mit HV starten** kann bereits aktive Kanäle übernehmen, wenn alle vier Sollwerte passen. Während der Nachregelung gelten neue Eingaben ab **Regelziele übernehmen**. Geänderte Elektroden durchlaufen erneut die eingestellte Einschwingzeit. Die Stromanzeige zeigt den gemessenen Strom in µA. Die Strombegrenzung folgt der vorhandenen Geräteeinstellung. Stoppen fährt die Kanäle ab und prüft Status und interne Restspannung. Auch beim Trennen fährt die Anwendung von ihr übernommene HV ab.
+- **Oszilloskop.** Für CH1–CH4 Signalnamen, Aufnahmeauswahl, Skalierung, Offset, Tastkopf und Kopplung einstellen. Triggerquelle, Schwelle, Flanke, Zeitbasis, Aufnahmemodus und Punktzahl wählen. **Neue Single-Aufnahme** übernimmt diese Einstellungen und wartet auf einen frischen Trigger. **Vorhandene Kurve abrufen** stoppt die Erfassung und übernimmt die gewählten, bereits am Gerät angezeigten Kanäle mit ihren eigenen Zeitachsen.
+- **Laser.** Im Labor den Interlock schließen. Einen noch gespeicherten Interlockfehler bei Bedarf über die separate Taste quittieren. Für den WaveGen die tatsächliche Anschlusslast wählen und den zur Verdrahtung passenden Scope-Trigger einstellen. **Scharfstellen** prüft Laserstatus und Scope-Bereitschaft. Bei verbundenem Bender werden alle vier Elektroden auf Zustand und Spannungsabweichung geprüft. **TTL auslösen** gibt einen Startauftrag. Der periodische Generator ist auf 0,1 Hz und 50 µs Pulsbreite eingestellt. Sobald das Scope den ersten frischen Trigger meldet, fordert das Backend WaveGen AUS an. Bei ausbleibender Flanke läuft die Abschaltfrist spätestens nach 8 s ab, zwei Sekunden vor Ablauf einer nominellen Periode. Der verbleibende Teil des Scharfstellfensters kann diese Frist verkürzen. Vor dem Kurvendownload prüft der Ablauf WaveGen-AUS, Laser-AUS und den Kopfzähler. Eine fehlende Kurve, eine abweichende Pulszahl oder eine unbestätigte Abschaltung erscheint als Fehler. Eine erneute Ausgabe braucht eine neue Bedienfreigabe.
+- **Externer Einzeltrigger.** Für eine hardwareseitig begrenzte Einzelausgabe die externe Einzelpulsquelle wählen. Die GUI wartet nach dem Scharfstellen auf den externen Puls und prüft den Zähler. Die Scharfschaltung läuft nach 15 s ab. Ein verbundenes Scope wird für die Aufnahme reserviert. Bei getrenntem Scope ist ein reiner Lasertest möglich.
+- **Messdaten.** Übertragene Messungen stehen einzeln zur Auswahl. Einen Zeitbereich mit der Maus aufziehen, um Min, Max, Spitze–Spitze, Mittelwert, RMS und die Zahl fehlender oder geclippter Samples zu sehen. **NPZ speichern** sichert Zeitachsen, Messwerte, Rohcodes, Qualitätsmasken, Signalnamen und Metadaten. **CSV exportieren** erzeugt eine Zeile je Sample mit Kanal, Signalname, Zeit in Sekunden, Spannung in Volt und Qualitätsflags. Der Zeitpunkt in `transferred_utc` bezeichnet die Übertragung. Ein mitgespeicherter Druckwert trägt seinen eigenen Lesezeitpunkt.
+- **Messprofil.** Benderziele, Reglerparameter, Scope-Belegung und Monitoringeinstellungen können in einer eigenen JSON gespeichert werden. Laden übernimmt die Eingabefelder. Verbinden, Übernehmen, HV und Laserfreigabe bleiben eigene Bedienaktionen.
+
+**Stand der Erprobung.** Die Geräte-Notebooks dokumentieren reale Einzelversuche, darunter einen extern ausgelösten Laserpuls. Beim Bender stimmte die intern gemessene Spannung (VMEAS) an den geprüften Punkten gut mit einem Multimeter überein. [Multimetervergleich der NHS-Module](src/lapis_control/devices/bender/README.md#multimetervergleich)
+
+Die integrierte Desktop-Anwendung wurde mit simulierten Instrumenten geprüft. Bei der periodischen WaveGen-Ausgabe hängen Flankenzahl und Abschaltzeit auch vom Generator, Betriebssystem und USB ab. Die Zählerprüfung erkennt das Ergebnis nach dem Versuch. Zur Erprobung des neuen Zeitfensters am Scope zuerst den vorhandenen Loopback-Aufbau mit abgezogener Lasertriggerleitung verwenden. [Laser-Testaufbau](src/lapis_control/devices/laser/README.md) · [Scope-Validierung](src/lapis_control/devices/oscilloscope/VALIDIERUNG.md)
 
 ## Projektstruktur
 
@@ -29,13 +46,11 @@ LAPIS-Control-Suite/
 │   │   ├── laser/                Treiber, Notebook, Dokumentation und tests/
 │   │   ├── oscilloscope/         Treiber, Notebook, Dokumentation und tests/
 │   │   └── vacuum/               Edwards TIC, Notebook, Dokumentation und tests/
-│   ├── gui/                     Bereich für die spätere PySide6-Oberfläche
-│   └── workflows/               Messabläufe wie die Vierkanalregelung am Bender
-└── tests/                       Tests der Gerätekonfiguration und Bender-Regelung
+│   ├── gui/                     PySide6-Oberfläche, Gerätejobs und Kurvendarstellung
+│   └── workflows/               Regelung, Lasermessung, Kurvenübertragung und Auswertung
+└── tests/                       Offline-Tests der Konfiguration, Workflows und GUI
 ```
 
-Der erste Messablauf hält einen gemeinsamen Spannungsbetrag auf vier
-Bender-Elektroden. Die GUI ist geplant.
 Die Geräteordner enthalten weiterhin ihre Test-Notebooks. Die
 [Strukturbeschreibung](docs/development/project-layout.md) erläutert Zuständigkeiten
 und die Zuordnung der früheren Pfade unter `Treiber/`.
@@ -51,7 +66,7 @@ python -m venv .venv
 
 In VS Code `.venv\Scripts\python.exe` als Interpreter und Notebook-Kernel wählen.
 Für reine Geräteansteuerung genügt `pip install -e .`; Matplotlib/Jupyter sind
-optional. PySide6 wird erst für GUI-Arbeit mit `pip install -e ".[gui]"` benötigt.
+optional. PySide6 wird mit `pip install -e ".[gui]"` installiert.
 Eine funktionierende VISA-Laufzeit für das Scope ist unabhängig von der
 Python-Paketinstallation erforderlich. Details: [Einrichtung](docs/development/setup.md).
 

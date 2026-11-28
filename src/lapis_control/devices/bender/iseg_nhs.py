@@ -117,13 +117,14 @@ class ModuleReading:
 
 @dataclass(frozen=True)
 class VoltageSample:
-    """Feedback before adjustment, and the signed command issued, if any."""
+    """Feedback before adjustment (volts and measured amperes) and any voltage command."""
     timestamp: float
     voltage_set: float
     voltage: float
     status: ChannelStatus
     requested_voltage: float | None
     observing: bool = False
+    current: float | None = None
 
     @property
     def in_tolerance(self) -> bool:
@@ -368,6 +369,11 @@ class NHSModule:
         return self.sign * abs(self._number(f':READ:VOLT? {self._channel(channel)}', 'V'))
 
     def read_voltage(self, channel):
+        """Return the signed voltage measured by the NHS module (VMEAS), in volts.
+
+        On 2026-11-28, VMEAS agreed closely with a multimeter at the voltages
+        checked on the LAPIS setup.
+        """
         return self.sign * abs(self._number(f':MEAS:VOLT? {self._channel(channel)}', 'V'))
 
     def check_regulation_module_status(self) -> None:
@@ -378,7 +384,8 @@ class NHSModule:
         if module & required != required or module & (ModuleStatus.INPUT_ERROR | ModuleStatus.SERVICE):
             raise DeviceError(f'{self.port}: cannot regulate with module status {module!r}')
 
-    def _regulation_status(self, channel: int) -> ChannelStatus:
+    def read_regulation_status(self, channel: int) -> ChannelStatus:
+        """Verify module and active channel health for voltage feedback."""
         self.check_regulation_module_status()
         status = self.read_status(channel)
         faults = (ChannelStatus.ARC | ChannelStatus.INPUT_ERROR | ChannelStatus.EMERGENCY_OFF |
@@ -453,7 +460,8 @@ class NHSModule:
                 if abs(measured) > measured_limit:
                     raise VerificationError(f'Channel {channel}: measured {measured:g} V exceeds '
                                             f'{measured_limit:g} V magnitude limit (setpoint {setpoint:g} V)')
-                status = self._regulation_status(channel)
+                current = self.read_current(channel)
+                status = self.read_regulation_status(channel)
                 if not lower <= abs(setpoint) <= upper:
                     raise VerificationError(f'Starting/current setpoint {setpoint:g} V outside trim limits')
                 if expected_set is not None and not math.isclose(setpoint, expected_set, abs_tol=0.01, rel_tol=1e-6):
@@ -481,7 +489,7 @@ class NHSModule:
                                                 f'measured {measured:g} V, target {target:g} V)')
                     self.set_voltage(channel, requested)
                 expected_set = setpoint if requested is None else requested
-            yield VoltageSample(stamp, setpoint, measured, status, requested, observing)
+            yield VoltageSample(stamp, setpoint, measured, status, requested, observing, current=current)
 
     def read_current(self, channel):
         """Measured amperes exactly as reported (no synthetic polarity sign)."""
@@ -637,13 +645,15 @@ class Bender:
         with self._lock:
             return {key: module.read_channel(ch) for key, (module, ch) in self.channels.items()}
 
-    def enable(self):
+    def enable(self, *, cancel: threading.Event | None = None) -> None:
         with self._lock, self.positive._lock, self.negative._lock:
             for module, ch in self.channels.values():
                 module.validate_voltage(ch, module.read_voltage_set(ch))
             completed = []
             for key, (module, ch) in self.channels.items():
                 try:
+                    if cancel is not None and cancel.is_set():
+                        raise InterruptedError('HV enable cancelled')
                     module.enable(ch)
                 except Exception as exc:
                     raise PartialUpdateError(completed, key, exc) from exc

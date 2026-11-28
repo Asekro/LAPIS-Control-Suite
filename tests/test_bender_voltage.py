@@ -1,5 +1,7 @@
 """Four-electrode trial with simulated NHS modules and a monotonic test clock."""
 from pathlib import Path
+from queue import Empty, Queue
+from threading import Event
 import sys
 import unittest
 from unittest.mock import patch
@@ -10,6 +12,7 @@ from lapis_control.devices.bender.iseg_nhs import (
 )
 from lapis_control.devices.bender.tests.test_iseg_nhs import FakeSerial
 from lapis_control.workflows.bender_voltage import hold_bender_voltage
+from lapis_control.workflows.laboratory import BenderControl
 
 
 class TrialSerial(FakeSerial):
@@ -136,6 +139,91 @@ class BenderVoltageTests(unittest.TestCase):
             hold_bender_voltage(self.bender, 15, duration_s=60)
         self.assertTrue(self.neg.on[1])
         self.assertFalse(any(';' in cmd for device in (self.pos, self.neg) for cmd in device.sent))
+
+    def test_individual_targets_active_takeover_and_cooperative_stop(self):
+        targets = dict(p0=10, p1=13, n0=-12, n1=-15)
+        self.bender.set_voltages(**targets)
+        self.bender.enable()
+        stop = Event()
+        observed = {}
+
+        def sample(key, feedback, stable):
+            observed[key] = feedback.voltage
+            if len(observed) == 4:
+                stop.set()
+
+        ownership = []
+        with patch.object(stop, 'wait', side_effect=self.advance):
+            hold_bender_voltage(self.bender, targets, duration_s=None, initial_settle_s=0,
+                                allow_active=True, stop_event=stop, on_sample=sample, on_control=ownership.append)
+        self.assertEqual(observed, targets)
+        self.assertEqual(ownership, [True, False])
+        self.assertFalse(any(self.pos.on) or any(self.neg.on))
+        self.assertEqual(self.now, 5)
+
+    def test_partial_live_target_failure_discharges_and_restores_all_electrodes(self):
+        updates = Queue()
+        confirmed = []
+        original = self.bender.negative.set_voltage
+
+        def fail_second_change(channel, value):
+            if value == -21:
+                raise VerificationError('Test write not confirmed')
+            original(channel, value)
+
+        def started(targets):
+            confirmed.append(targets)
+            updates.put(dict(targets, p0=22, n0=-21))
+
+        with (patch.object(self.bender.negative, 'set_voltage', side_effect=fail_second_change),
+              self.assertRaisesRegex(VerificationError, 'not confirmed')):
+            hold_bender_voltage(self.bender, 15, duration_s=None, updates=updates, on_targets=started)
+        self.assertEqual(len(confirmed), 1)
+        self.assertTrue(any(cmd.startswith(':VOLT 22,') for cmd in self.pos.sent))
+        self.assert_restored()
+
+    def test_new_target_resettles_only_changed_channel_and_keeps_other_trim(self):
+        updates = Queue()
+        self.pos.offsets[0] = -1
+        observed = {k: [] for k in self.bender.channels}
+        confirmed = []
+
+        def wait_for_update(timeout):
+            try:
+                return Queue.get(updates, block=False)
+            except Empty:
+                self.now += timeout
+                raise
+
+        def record(key, sample, holding):
+            observed[key].append((self.now, sample, holding))
+            if key == 'p0' and holding and len(confirmed) == 1:
+                updates.put(dict(confirmed[0], n0=-6))
+
+        with patch.object(updates, 'get', side_effect=wait_for_update):
+            hold_bender_voltage(self.bender, 15, duration_s=90, initial_settle_s=10,
+                                updates=updates, on_targets=confirmed.append, on_sample=record)
+        self.assertEqual([v['n0'] for v in confirmed], [-15, -6])
+        after_change = [s for _, s, _ in observed['n0'] if s.voltage_set == -6]
+        self.assertTrue(after_change[0].observing)
+        self.assertTrue(any(s.in_tolerance for s in after_change))
+        t1, t2 = [t for t, _, holding in observed['p0'] if holding][:2]
+        self.assertAlmostEqual(t2 - t1, 30)
+        self.assertGreater(observed['p0'][-1][1].voltage_set, 15)
+        self.assert_restored()
+
+    def test_readiness_rejects_drift_and_manual_close_confirms_discharge(self):
+        controller = BenderControl(self.bender)
+        targets = dict(p0=10, p1=13, n0=-12, n1=-15)
+        controller.enable(targets, Event())
+        result = controller.shot_snapshot(targets, 0.2, Event())
+        self.assertEqual(result['electrodes']['n1']['measured_v'], -15)
+        self.pos.offsets[0] = 0.5
+        with self.assertRaisesRegex(RuntimeError, 'p0'):
+            controller.shot_snapshot(targets, .2, Event())
+        controller.close()
+        self.assertFalse(controller.managed)
+        self.assertFalse(any(self.pos.on) or any(self.neg.on))
 
     def test_interruption_and_partial_enable_restore_all_four(self):
         def interrupt(*args):

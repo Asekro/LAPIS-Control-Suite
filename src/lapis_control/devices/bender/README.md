@@ -92,12 +92,15 @@ Gerätevorzeichen unverändert. Die Messspannungen werden mit `sign * abs(raw)`
 auf die geprüfte Modulpolarität normiert. Bei Messwerten nahe null bleibt
 das rohe Vorzeichen daher nicht erhalten; die Diagnosezelle 2a zeigt Rohantworten.
 
-### Nachregelung für eine Elektrode
+### Multimetervergleich
 
-Beim früheren ±10-V-Test meldete p0 bei 10,00 V Sollwert 8,72 V und n0 bei
-−10,00 V Sollwert −10,05 V. Das NHS liefert mit `:READ:VOLT?` den programmierten
-Sollwert (VSET) und mit `:MEAS:VOLT?` die interne Spannungsmessung (VMEAS).
-iseg spezifiziert deren Genauigkeit für Ausgangsbeträge **über 1 % der
+Das NHS liefert mit `:READ:VOLT?` den programmierten Sollwert (VSET).
+`NHSModule.read_voltage()` liest mit `:MEAS:VOLT?` die intern gemessene Spannung (VMEAS).
+Bei der Gegenmessung am LAPIS-Aufbau am **28.11.2026** stimmte VMEAS bei den
+geprüften Spannungen gut mit der Anzeige des Multimeters überein. Das Ergebnis
+ist als qualitativer Vergleich dokumentiert.
+
+iseg spezifiziert die Genauigkeit von VMEAS für Ausgangsbeträge **über 1 % der
 Nennspannung** bis unterhalb der Nennspannung. Bei den 4-kV-Modulen sind 15 V
 nur 0,375 %. Für die absolute Genauigkeit bei 15 V gibt dieses Datenblatt
 keine Fehlergrenze an. [NHS-Handbuch, Kap. 4, S. 11](https://iseg-hv.com/files/media/docitems_file_20221221154739.pdf#page=11)
@@ -106,13 +109,19 @@ Am Display zeigt **VI-MEAS** die intern gemessene Spannung und den gemessenen
 Strom des Kanals. **V-MS** zeigt dieselbe Messspannung zusammen mit dem
 programmierten Spannungssollwert. [NHS-Handbuch, Abschn. 5.2.1, S. 15](https://iseg-hv.com/files/media/docitems_file_20221221154739.pdf#page=15)
 
+### Nachregelung für eine Elektrode
+
+Beim früheren ±10-V-Test meldete p0 bei 10,00 V Sollwert 8,72 V und n0 bei
+−10,00 V Sollwert −10,05 V.
+
 Notebook-Abschnitt **6a** enthält den vollständigen Versuch für p0. Nach der
 Konfigurationszelle genügt dieser Abschnitt. Die separate Freigabe
 `ALLOW_P0_TEST` steht standardmäßig auf `False`. Für den Einkanalversuch
 bleiben `ALLOW_WRITES` und `ALLOW_HV_ON` auf `False`.
 
 `module.regulate_voltage(...)` liefert pro Abfrage einen Zeitstempel, VSET,
-VMEAS, den Kanalstatus und einen gegebenenfalls neu angeforderten Sollwert.
+VMEAS, den Messstrom in Ampere, den Kanalstatus und einen gegebenenfalls neu
+angeforderten Spannungssollwert.
 Erst die Iteration startet die Rückkopplung auf einem bereits eingeschalteten
 Kanal. Nach Erreichen des Toleranzbands läuft die Messung weiter und korrigiert
 spätere Drift. Der Aufrufer bestimmt Laufzeit und Abschaltung. Beispiel für
@@ -156,9 +165,10 @@ Abfahren meldete p0 0,67 V, die spätere Kontrollabfrage ergab Kanal aus,
 Dieser Lauf hatte eine Stellgrenze von 20 V. Im späteren, in Abschnitt 6a
 gespeicherten Lauf mit 100-V-Grenze lagen die letzten fünf internen Messwerte
 zwischen 15,12 und 15,13 V bei 15,12 V Stellwert (43,4 bis 64,1 s).
-Die Ursache des Sprungs im ersten Lauf und die Spannung an der Elektrode sind offen.
+Für den Spannungssprung am 26.11.2026 liegt nur der interne NHS-Messwert vor.
+Seine Ursache ist weiterhin offen.
 
-Für die Prüfung an der Elektrode den freigegebenen Messpunkt gegen das
+Für eine quantitative Prüfung direkt an der Elektrode den freigegebenen Messpunkt gegen das
 zugehörige Bezugspotential unter Betriebslast mit einem unabhängigen, für den
 HV-Aufbau geeigneten Messsystem messen. Dessen Auflösung und Messunsicherheit
 bei 15 V müssen zur gewünschten Toleranz passen. VSET, VMEAS und den zeitgleichen
@@ -202,11 +212,25 @@ Für die spätere Software liegt der Ablauf in
 `lapis_control.workflows.bender_voltage.hold_bender_voltage`. Er wartet
 zwischen den Prüfterminen und führt die seriellen Transaktionen in einem
 Ablauf aus. Bei vier stabilen Kanälen ergeben sich im Mittel rund acht
-Kanalprüfungen pro Minute. Eine solche Prüfung umfasst vier Leseabfragen
-(VSET, VMEAS, Modul- und Kanalstatus). Im Zielband fallen keine Stellbefehle
+Kanalprüfungen pro Minute. Eine solche Prüfung umfasst fünf Leseabfragen
+(VSET, VMEAS, Messstrom, Modul- und Kanalstatus). Die GUI zeigt den Messstrom
+jedes Kanals im jeweiligen Prüf- oder Haltetakt in µA an. Im Zielband fallen keine Stellbefehle
 an. Eine Drift kurz nach einer Prüfung kann ungefähr 30 s zuzüglich laufender
 Kommunikation unentdeckt bleiben. Die Abstände in der Testzelle lassen sich
 an die beobachtete Drift und die gewünschte Reaktionszeit anpassen.
+
+Die Desktop-Anwendung kann alternativ vier vorzeichenbehaftete Zielwerte als
+Mapping übergeben. Mit `allow_active=True` übernimmt der Ablauf bereits aktive
+Kanäle nach Zustands- und Sollwertprüfung. Ein `threading.Event` über
+`stop_event` weckt den Regler aus seiner Wartezeit und leitet das Abfahren ein.
+Die Einzelversuche im Notebook verwenden weiterhin den gemeinsamen Zielbetrag.
+
+Während der Regelung übernimmt **Regelziele übernehmen** die vier aktuell
+eingegebenen Ziele. Der Regler prüft die Änderungen, schreibt die neuen
+Spannungssollwerte für die betroffenen Elektroden und liest sie zur Bestätigung
+zurück. Für diese Kanäle beginnen Einschwingzeit und schneller Prüftakt erneut.
+Die maximale Stellschrittweite gilt für die anschließenden automatischen
+Korrekturen. Die Bender-GUI liest Messstrom und Stromlimit ausschließlich aus.
 
 Der Aufrufer übergibt die geöffnete Verbindung und besitzt während des Tests
 den Schreibzugriff auf die vier Kanäle. `duration_s=None` erlaubt fortlaufenden
